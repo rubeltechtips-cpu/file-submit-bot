@@ -28,7 +28,7 @@ import base64
 
 # ================ GITHUB CONFIGURATION ================
 # 👇 এখানে আপনার তথ্য দিন
-GITHUB_REPO = "rubelofficial999/file submit"  # আপনার GitHub রেপো নাম দিন
+GITHUB_REPO = "rubeltechtips/file-submit-bot"  # আপনার GitHub রেপো নাম দিন
 GITHUB_BRANCH = "main"  # অথবা "master"
 GITHUB_TOKEN = "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"  # আপনার Token টি বসান
 
