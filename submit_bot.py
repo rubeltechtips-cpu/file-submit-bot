@@ -23,22 +23,90 @@ from collections import Counter
 import shutil
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
+import requests
+import base64
+
+# ================ GITHUB CONFIGURATION ================
+# 👇 এখানে আপনার তথ্য দিন
+GITHUB_REPO = "rubelofficial999/file-submit-bot"  # আপনার GitHub রেপো নাম দিন
+GITHUB_BRANCH = "main"  # অথবা "master"
+GITHUB_TOKEN = "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"  # আপনার Token টি বসান
+
+# GitHub API URLs
+GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/contents"
+
+# ================ GITHUB FUNCTIONS ================
+def upload_to_github(file_path, github_path, commit_message):
+    """
+    Upload a file to GitHub repository
+    Returns: (success, file_url)
+    """
+    try:
+        # Read file content
+        with open(file_path, 'rb') as f:
+            content = f.read()
+        
+        # Encode to base64
+        encoded_content = base64.b64encode(content).decode('utf-8')
+        
+        # Prepare API request
+        url = f"{GITHUB_API_URL}/{github_path}"
+        
+        # Get current file SHA if exists (for update)
+        sha = None
+        response = requests.get(url, headers={
+            'Authorization': f'token {GITHUB_TOKEN}',
+            'Accept': 'application/vnd.github.v3+json'
+        })
+        if response.status_code == 200:
+            sha = response.json().get('sha')
+        
+        # Prepare data
+        data = {
+            'message': commit_message,
+            'content': encoded_content,
+            'branch': GITHUB_BRANCH
+        }
+        if sha:
+            data['sha'] = sha
+        
+        # Upload to GitHub
+        response = requests.put(url, 
+            headers={
+                'Authorization': f'token {GITHUB_TOKEN}',
+                'Accept': 'application/vnd.github.v3+json'
+            },
+            json=data
+        )
+        
+        if response.status_code in [200, 201]:
+            file_url = response.json().get('content', {}).get('html_url', '')
+            logging.info(f"✅ File uploaded to GitHub: {github_path}")
+            return True, file_url
+        else:
+            logging.error(f"❌ GitHub upload failed: {response.text}")
+            return False, None
+            
+    except Exception as e:
+        logging.error(f"❌ GitHub upload error: {e}")
+        return False, None
+
+def get_github_file_url(github_path):
+    """Get the raw URL of a file on GitHub"""
+    return f"https://raw.githubusercontent.com/{GITHUB_REPO}/{GITHUB_BRANCH}/{github_path}"
 
 # ================ HTTP SERVER FOR RENDER ================
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        # সব পাথের জন্য 200 OK রিটার্ন করবে
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b'OK')
     
     def do_HEAD(self):
-        # HEAD request এর জন্যও
         self.send_response(200)
         self.end_headers()
     
     def log_message(self, format, *args):
-        # Suppress HTTP server logs
         pass
 
 def run_http_server():
@@ -48,7 +116,7 @@ def run_http_server():
     server.serve_forever()
 
 # ================ BOT CONFIGURATION ================
-BOT_TOKEN = "8690227634:AAGGS_W2F7TS6XChIVPRTBQpEYjTmV5t3Us"
+BOT_TOKEN = "8884157908:AAH3CjxZ-J2l6oUDczu_zD-8GKKh_TleNUM"
 CHANNEL_USERNAME = "@quick_sell_bd"
 CHANNEL_URL = "https://t.me/quick_sell_bd"
 ADMIN_IDS = [8061006207]
@@ -126,7 +194,6 @@ def clean_number(value):
 def convert_excel_to_text(excel_path, output_dir=TEXT_DIR):
     """
     Convert Excel file to text format and save as .txt file
-    Only data rows, no headers or metadata
     """
     try:
         wb = load_workbook(excel_path, data_only=True)
@@ -137,16 +204,13 @@ def convert_excel_to_text(excel_path, output_dir=TEXT_DIR):
         text_filename = f"{base_name}_converted_{timestamp}.txt"
         text_path = os.path.join(output_dir, text_filename)
         
-        # Collect all values from Excel
         all_values = []
         for row in ws.iter_rows(values_only=True):
             if any(cell is not None and str(cell).strip() != '' for cell in row):
                 cleaned_row = [clean_number(cell) for cell in row]
-                # Join all cells with tab
                 line = '\t'.join(cleaned_row)
                 all_values.append(line)
         
-        # Write to text file
         with open(text_path, 'w', encoding='utf-8') as f:
             for line in all_values:
                 f.write(line + '\n')
@@ -172,7 +236,6 @@ def get_existing_texts_from_all_orders():
             with open(text_file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
             
-            # Extract all text values from order file
             for line in content.split('\n'):
                 if line.strip():
                     parts = line.strip().split('\t')
@@ -186,16 +249,11 @@ def get_existing_texts_from_all_orders():
     return all_texts
 
 def check_duplicates_in_text_file(text_file_path, existing_texts):
-    """
-    Check if any text in the text file matches existing texts
-    Returns: (cleaned_text_path, removed_count, matched_values, remaining_count)
-    """
+    """Check if any text in the text file matches existing texts"""
     try:
-        # Read the text file
         with open(text_file_path, 'r', encoding='utf-8') as f:
             lines = f.readlines()
         
-        # Process each line
         new_lines = []
         matched_values = []
         removed_count = 0
@@ -204,10 +262,7 @@ def check_duplicates_in_text_file(text_file_path, existing_texts):
             if not line.strip():
                 continue
             
-            # Split by tab to get individual values
             parts = line.strip().split('\t')
-            
-            # Check if any part matches existing text
             should_remove = False
             matched_parts = []
             
@@ -222,11 +277,9 @@ def check_duplicates_in_text_file(text_file_path, existing_texts):
             else:
                 new_lines.append(line)
         
-        # If no matches found, return original
         if removed_count == 0:
             return text_file_path, 0, [], len(lines)
         
-        # Create cleaned text file
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         cleaned_filename = f"duplicate_removed_{timestamp}.txt"
         cleaned_path = os.path.join(TEXT_DIR, cleaned_filename)
@@ -236,8 +289,6 @@ def check_duplicates_in_text_file(text_file_path, existing_texts):
                 f.write(line)
         
         remaining_count = len(new_lines)
-        
-        # Remove duplicate values from matched list
         unique_matched = list(set(matched_values))
         
         return cleaned_path, removed_count, unique_matched, remaining_count
@@ -277,7 +328,6 @@ def process_excel_file(file_path, user_id):
             cleaned_path = os.path.join(PROCESSED_DIR, cleaned_filename)
             wb.save(cleaned_path)
             
-            # Count remaining rows
             remaining_rows = 0
             for row in ws.iter_rows(values_only=True):
                 if row[0] is not None and str(row[0]).strip():
@@ -300,6 +350,8 @@ def load_data():
 def save_data(data):
     with open(DATA_FILE, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
+    # Upload to GitHub
+    upload_to_github(DATA_FILE, "data/user_data.json", "Update user data")
 
 def load_categories():
     if os.path.exists(CATEGORIES_FILE):
@@ -315,6 +367,7 @@ def load_categories():
 def save_categories(categories):
     with open(CATEGORIES_FILE, 'w', encoding='utf-8') as f:
         json.dump(categories, f, ensure_ascii=False, indent=4)
+    upload_to_github(CATEGORIES_FILE, "data/categories.json", "Update categories")
 
 def load_orders():
     if os.path.exists(ORDERS_FILE):
@@ -325,6 +378,7 @@ def load_orders():
 def save_orders(orders):
     with open(ORDERS_FILE, 'w', encoding='utf-8') as f:
         json.dump(orders, f, ensure_ascii=False, indent=4)
+    upload_to_github(ORDERS_FILE, "data/orders.json", "Update orders")
 
 def load_vip_users():
     if os.path.exists(VIP_USERS_FILE):
@@ -335,6 +389,7 @@ def load_vip_users():
 def save_vip_users(vip_users):
     with open(VIP_USERS_FILE, 'w', encoding='utf-8') as f:
         json.dump(vip_users, f, ensure_ascii=False, indent=4)
+    upload_to_github(VIP_USERS_FILE, "data/vip_users.json", "Update VIP users")
 
 def is_vip_user(user_id):
     vip_users = load_vip_users()
@@ -397,7 +452,6 @@ def get_status_text(status):
     return status_map.get(status, '⏳ Pending')
 
 def get_main_menu_keyboard(user_id):
-    """Get main menu as ReplyKeyboardMarkup"""
     is_admin = user_id in ADMIN_IDS
     keyboard = [
         ["📝 File Submit"],
@@ -409,7 +463,6 @@ def get_main_menu_keyboard(user_id):
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
 
 def get_categories_keyboard(user_id):
-    """Get categories as ReplyKeyboardMarkup"""
     categories = load_categories()
     keyboard = []
     row = []
@@ -429,7 +482,6 @@ def get_categories_keyboard(user_id):
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
 
 def get_admin_panel_keyboard():
-    """Get admin panel as ReplyKeyboardMarkup"""
     keyboard = [
         ["📁 Manage Categories", "👑 VIP Users"],
         ["🔍 Search User", "📢 Broadcast"],
@@ -497,7 +549,6 @@ def save_payment_number(update, context):
     show_main_menu(update, user_id)
 
 def show_main_menu(update, user_id):
-    """Show main menu with ReplyKeyboardMarkup"""
     keyboard = get_main_menu_keyboard(user_id)
     try:
         if hasattr(update, 'callback_query') and update.callback_query:
@@ -508,7 +559,6 @@ def show_main_menu(update, user_id):
         update.message.reply_text("🏠 Main Menu", reply_markup=keyboard)
 
 def show_categories_menu(update, user_id):
-    """Show categories with ReplyKeyboardMarkup"""
     keyboard = get_categories_keyboard(user_id)
     try:
         if hasattr(update, 'callback_query') and update.callback_query:
@@ -559,7 +609,6 @@ def save_order_with_file(update, context, user_id, file, category_name, price, u
     
     # If all data was duplicate (file became empty)
     if remaining_count == 0 and removed_count > 0:
-        # All data was duplicate, send message and return
         duplicates_list = "\n".join([f"{i+1}. {val}" for i, val in enumerate(matched_values[:10])])
         if len(matched_values) > 10:
             duplicates_list += f"\n... and {len(matched_values) - 10} more"
@@ -570,7 +619,6 @@ def save_order_with_file(update, context, user_id, file, category_name, price, u
             f"📋 Duplicate values:\n{duplicates_list}\n\n"
             f"💡 Please upload a file with NEW data only."
         )
-        # Clean up files
         try:
             os.remove(file_path)
             os.remove(processed_path)
@@ -610,6 +658,27 @@ def save_order_with_file(update, context, user_id, file, category_name, price, u
     order_id = str(len(orders) + 1)
     price_str = f"{price:.2f}".rstrip('0').rstrip('.') if isinstance(price, float) else str(price)
     
+    # Upload files to GitHub
+    github_files = {}
+    
+    # Upload processed Excel file
+    github_excel_path = f"orders/order_{order_id}/data.xlsx"
+    success, excel_url = upload_to_github(processed_path, github_excel_path, f"Add order #{order_id} Excel data")
+    if success:
+        github_files['excel'] = excel_url
+    
+    # Upload text file
+    github_text_path = f"orders/order_{order_id}/data.txt"
+    success, text_url = upload_to_github(final_text_path, github_text_path, f"Add order #{order_id} text data")
+    if success:
+        github_files['text'] = text_url
+    
+    # Upload original file
+    github_original_path = f"orders/order_{order_id}/original_{os.path.basename(file_path)}"
+    success, original_url = upload_to_github(file_path, github_original_path, f"Add order #{order_id} original file")
+    if success:
+        github_files['original'] = original_url
+    
     order_data = {
         "order_id": order_id,
         "user_id": user_id,
@@ -633,7 +702,8 @@ def save_order_with_file(update, context, user_id, file, category_name, price, u
         "matched_count": 0,
         "matched_data": [],
         "existing_duplicates_removed": removed_count,
-        "existing_duplicates_values": matched_values
+        "existing_duplicates_values": matched_values,
+        "github_urls": github_files
     }
     
     orders[order_id] = order_data
@@ -664,6 +734,17 @@ def save_order_with_file(update, context, user_id, file, category_name, price, u
     else:
         file_duplicates_text = f"\n\n✅ No duplicates found in file!\n✅ Total entries: {final_rows}"
     
+    # GitHub links
+    github_links = ""
+    if github_files:
+        github_links = "\n\n📎 **GitHub Backups:**"
+        if 'excel' in github_files:
+            github_links += f"\n📊 Excel: [View on GitHub]({github_files['excel']})"
+        if 'text' in github_files:
+            github_links += f"\n📝 Text: [View on GitHub]({github_files['text']})"
+        if 'original' in github_files:
+            github_links += f"\n📁 Original: [View on GitHub]({github_files['original']})"
+    
     user_text = f"━━━━━━━━━━━━━━━━━━━━\n"
     user_text += f"✅ ORDER PROCESSED\n"
     user_text += f"━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -681,10 +762,11 @@ def save_order_with_file(update, context, user_id, file, category_name, price, u
     user_text += f"🕐 Submitted: {current_time}"
     user_text += existing_duplicates_text
     user_text += file_duplicates_text
-    user_text += f"\n\n📎 Your file has been submitted successfully!"
+    user_text += github_links
+    user_text += f"\n\n📎 Your file has been submitted and backed up to GitHub!"
     
     keyboard = get_main_menu_keyboard(user_id)
-    update.message.reply_text(user_text, reply_markup=keyboard)
+    update.message.reply_text(user_text, reply_markup=keyboard, parse_mode='Markdown')
     
     for admin_id in ADMIN_IDS:
         try:
@@ -706,7 +788,13 @@ def save_order_with_file(update, context, user_id, file, category_name, price, u
             if order_data.get('admin_note'):
                 note_display = f"\n\n📝 Note: {order_data['admin_note']}"
             
-            caption = f"📦 New Order #{order_id}\n\n{order_text}\n\n📊 Existing Duplicates Removed: {removed_count}\n📊 File Duplicates Removed: {len(file_duplicates)}\n📁 Data: {final_rows} rows (cleaned){note_display}"
+            github_backup = ""
+            if github_files:
+                github_backup = f"\n\n📎 GitHub Backups:"
+                for key, url in github_files.items():
+                    github_backup += f"\n• {key}: {url}"
+            
+            caption = f"📦 New Order #{order_id}\n\n{order_text}\n\n📊 Existing Duplicates Removed: {removed_count}\n📊 File Duplicates Removed: {len(file_duplicates)}\n📁 Data: {final_rows} rows (cleaned){note_display}{github_backup}"
             
             context.bot.send_document(
                 chat_id=admin_id,
@@ -727,7 +815,6 @@ def handle_file_upload(update, context):
     
     file_name = file.file_name.lower()
     
-    # Check if it's a report upload (admin only)
     if user_id in ADMIN_IDS and context.user_data.get('awaiting_report'):
         if file_name.endswith('.txt'):
             handle_text_report_upload(update, context)
@@ -757,7 +844,6 @@ def handle_file_upload(update, context):
     save_order_with_file(update, context, user_id, file, category['name'], price, user_type)
 
 def handle_text_report_upload(update, context):
-    """Handle text file report upload"""
     user_id = update.effective_user.id
     file = update.message.document
     
@@ -771,6 +857,10 @@ def handle_text_report_upload(update, context):
         
         with open(report_path, 'wb') as f:
             f.write(file_content)
+        
+        # Upload report to GitHub
+        github_report_path = f"reports/report_{timestamp}.txt"
+        upload_to_github(report_path, github_report_path, f"Add report {timestamp}")
         
         update.message.reply_text("⏳ Processing report... Please wait.")
         
@@ -793,7 +883,12 @@ def handle_text_report_upload(update, context):
                 result_file = os.path.join(REPORT_RESULTS_DIR, f"result_{report_id}.json")
                 with open(result_file, 'w', encoding='utf-8') as f:
                     json.dump(report_result, f, ensure_ascii=False, indent=4)
+                
+                # Upload result to GitHub
+                github_result_path = f"reports/results/result_{report_id}.json"
+                upload_to_github(result_file, github_result_path, f"Add report result {report_id}")
             
+            # Continue with report processing
             if matched_orders:
                 update.message.reply_text(
                     f"✅ Report Processed!\n\n"
@@ -2144,6 +2239,7 @@ def main():
     print(f"📁 Report directory: {REPORT_DIR}")
     print(f"📁 Report Results directory: {REPORT_RESULTS_DIR}")
     print(f"👑 Admins: {ADMIN_IDS}")
+    print(f"📦 GitHub Backup: Enabled")
     
     updater.idle()
 
