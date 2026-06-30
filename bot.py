@@ -1,2247 +1,2661 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-
-import sys
-import os
-
-# Add virtual environment path
-sys.path.insert(0, '/home/admin202678/.virtualenvs/mybot/lib/python3.8/site-packages')
-
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
-from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, MessageHandler, Filters
-import json
 import os
-from datetime import datetime
-import hashlib
-from pathlib import Path
-import openpyxl
-from openpyxl import Workbook, load_workbook
 import io
+import time
 import re
-from collections import Counter
-import shutil
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
-import requests
-import base64
+import json
+from datetime import datetime
+from telegram import (
+    Update, ReplyKeyboardMarkup, KeyboardButton, InputFile,
+    ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton,
+    ChatMember
+)
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler,
+    ContextTypes, ConversationHandler, CallbackQueryHandler, filters
+)
+from openpyxl import Workbook, load_workbook
 
-# ================ GITHUB CONFIGURATION ================
-# 👇 এখানে আপনার তথ্য দিন
-GITHUB_REPO = "rubeltechtips/file-submit-bot"  # আপনার GitHub রেপো নাম দিন
-GITHUB_BRANCH = "main"  # অথবা "master"
-GITHUB_TOKEN = "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"  # আপনার Token টি বসান
+# ================ CONFIG ================
+BOT_TOKEN = "8349208659:AAEyJikjx1tUri_PztFGRca_lPT0WilJ0N0"
+ADMIN_ID = 8061006207
+ADMIN_USERNAME = "Rubel_QSB"
+CHANNEL_USERNAME = "quick_sell_bd"
+DATA_DIR = "categories"
+TXT_DIR = "txt_files"
+EXCEL_DIR = "excel_files"
+LOG_DIR = "logs"
 
-# GitHub API URLs
-GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/contents"
+os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(TXT_DIR, exist_ok=True)
+os.makedirs(EXCEL_DIR, exist_ok=True)
+os.makedirs(LOG_DIR, exist_ok=True)
 
-# ================ GITHUB FUNCTIONS ================
-def upload_to_github(file_path, github_path, commit_message):
-    """
-    Upload a file to GitHub repository
-    Returns: (success, file_url)
-    """
+# ================ STATES ================
+(
+    MAIN_MENU,
+    BUY_MENU,
+    BUY_SUB_MENU,
+    ADMIN_PANEL,
+    ADD_MAIN_CAT,
+    REMOVE_MAIN_CAT,
+    MANAGE_CATEGORY,
+    MANAGE_SUB_CATEGORY,
+    ADD_SUB_CAT,
+    REMOVE_SUB_CAT,
+    ADD_ITEMS_TXT,
+    EDIT_PAYMENT,
+    EDIT_PRICE_MAIN,
+    EDIT_PRICE_SUB,
+    RECEIVE_NEW_PRICE,
+    GET_QUANTITY,
+    WAIT_SCREENSHOT,
+    DEPOSIT,
+    GET_DEPOSIT_AMOUNT,
+    DASHBOARD,
+    SEND_NOTICE,
+    VIEW_USER_PROFILE,
+    SEARCH_USER_PROFILE,
+    MANAGE_PAYMENT_CATEGORIES,
+    SEARCH_USER_FOR_BALANCE,
+    BALANCE_EDIT_ACTION,
+    RECEIVE_BALANCE_EDIT_AMOUNT,
+    CONFIRM_ORDER,
+    DEPOSIT_SELECT_METHOD,
+    DEPOSIT_ENTER_AMOUNT,
+    DEPOSIT_ENTER_TRXID,
+    ADMIN_ADD_PAYMENT_METHOD,
+    ADMIN_VIEW_PAYMENT_METHODS,
+    ADMIN_DELETE_PAYMENT_METHOD,
+    ADMIN_RECEIVE_PAYMENT_DETAILS
+) = range(35)
+
+# ================ LOGGER ================
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# SMS লগ ফাইল
+SMS_LOG_FILE = os.path.join(LOG_DIR, "sms_log.txt")
+DEPOSIT_LOG_FILE = os.path.join(LOG_DIR, "deposit_log.txt")
+
+# ================ DATA ================
+categories = {}
+prices = {}
+payment_methods = {}
+balances = {}
+user_sales = {}
+user_deposits = {}
+user_info = {}
+total_deposits = 0
+total_sales = 0
+sales_count_per_category = {}
+transaction_log = []
+dashboard_message = "স্বাগতম! এটি আপনার বটের ড্যাশবোর্ড।"
+MANUAL_DELIVERY_CATEGORIES = []
+
+# অটো ডিপোজিট সিস্টেমের জন্য ডেটা
+pending_deposits = {}  # {trxid: {"user_id": user_id, "amount": amount, "timestamp": time, "method": method, "username": username}}
+processed_trxids = set()  # ইতিমধ্যে প্রসেস করা TRXID গুলো
+sms_log = []  # সমস্ত SMS লগ
+
+# ================ DATA PERSISTENCE ================
+def load_user_data():
+    global balances, user_sales, user_deposits, user_info, total_deposits, total_sales
+    global transaction_log, categories, prices, sales_count_per_category
+    global MANUAL_DELIVERY_CATEGORIES, payment_methods, pending_deposits, processed_trxids
     try:
-        # Read file content
-        with open(file_path, 'rb') as f:
-            content = f.read()
-        
-        # Encode to base64
-        encoded_content = base64.b64encode(content).decode('utf-8')
-        
-        # Prepare API request
-        url = f"{GITHUB_API_URL}/{github_path}"
-        
-        # Get current file SHA if exists (for update)
-        sha = None
-        response = requests.get(url, headers={
-            'Authorization': f'token {GITHUB_TOKEN}',
-            'Accept': 'application/vnd.github.v3+json'
-        })
-        if response.status_code == 200:
-            sha = response.json().get('sha')
-        
-        # Prepare data
-        data = {
-            'message': commit_message,
-            'content': encoded_content,
-            'branch': GITHUB_BRANCH
-        }
-        if sha:
-            data['sha'] = sha
-        
-        # Upload to GitHub
-        response = requests.put(url, 
-            headers={
-                'Authorization': f'token {GITHUB_TOKEN}',
-                'Accept': 'application/vnd.github.v3+json'
-            },
-            json=data
-        )
-        
-        if response.status_code in [200, 201]:
-            file_url = response.json().get('content', {}).get('html_url', '')
-            logging.info(f"✅ File uploaded to GitHub: {github_path}")
-            return True, file_url
-        else:
-            logging.error(f"❌ GitHub upload failed: {response.text}")
-            return False, None
-            
-    except Exception as e:
-        logging.error(f"❌ GitHub upload error: {e}")
-        return False, None
-
-def get_github_file_url(github_path):
-    """Get the raw URL of a file on GitHub"""
-    return f"https://raw.githubusercontent.com/{GITHUB_REPO}/{GITHUB_BRANCH}/{github_path}"
-
-# ================ HTTP SERVER FOR RENDER ================
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b'OK')
-    
-    def do_HEAD(self):
-        self.send_response(200)
-        self.end_headers()
-    
-    def log_message(self, format, *args):
+        with open("user_data.json", "r", encoding='utf-8') as f:
+            data = json.load(f)
+            balances.update({int(k): v for k, v in data.get("balances", {}).items()})
+            user_sales.update({int(k): v for k, v in data.get("user_sales", {}).items()})
+            user_deposits.update({int(k): v for k, v in data.get("user_deposits", {}).items()})
+            user_info.update({int(k): v for k, v in data.get("user_info", {}).items()})
+            total_deposits = data.get("total_deposits", 0)
+            total_sales = data.get("total_sales", 0)
+            transaction_log = data.get("transaction_log", [])
+            categories.update(data.get("categories", {}))
+            prices.update(data.get("prices", {}))
+            sales_count_per_category.update(data.get("sales_count_per_category", {}))
+            MANUAL_DELIVERY_CATEGORIES = data.get("manual_delivery_categories", [])
+            payment_methods.update(data.get("payment_methods", {}))
+            pending_deposits.update(data.get("pending_deposits", {}))
+            processed_trxids = set(data.get("processed_trxids", []))
+    except FileNotFoundError:
         pass
 
-def run_http_server():
-    port = int(os.environ.get('PORT', 10000))
-    server = HTTPServer(('0.0.0.0', port), HealthHandler)
-    print(f"🌐 HTTP server running on port {port}")
-    server.serve_forever()
-
-# ================ BOT CONFIGURATION ================
-BOT_TOKEN = "8884157908:AAH3CjxZ-J2l6oUDczu_zD-8GKKh_TleNUM"
-CHANNEL_USERNAME = "@quick_sell_bd"
-CHANNEL_URL = "https://t.me/quick_sell_bd"
-ADMIN_IDS = [8061006207]
-
-# File paths - Using os.path.join for cross-platform compatibility
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_FILE = os.path.join(BASE_DIR, "user_data.json")
-CATEGORIES_FILE = os.path.join(BASE_DIR, "categories.json")
-ORDERS_FILE = os.path.join(BASE_DIR, "orders.json")
-VIP_USERS_FILE = os.path.join(BASE_DIR, "vip_users.json")
-UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
-PROCESSED_DIR = os.path.join(BASE_DIR, "processed")
-TEXT_DIR = os.path.join(BASE_DIR, "text_files")
-REPORT_DIR = os.path.join(BASE_DIR, "reports")
-REPORT_RESULTS_DIR = os.path.join(BASE_DIR, "report_results")
-
-def ensure_directory_exists(directory):
-    """Ensure directory exists, create if not"""
-    if not os.path.exists(directory):
-        os.makedirs(directory)
-        logging.info(f"Created directory: {directory}")
-    return directory
-
-# Create directories
-ensure_directory_exists(UPLOAD_DIR)
-ensure_directory_exists(PROCESSED_DIR)
-ensure_directory_exists(TEXT_DIR)
-ensure_directory_exists(REPORT_DIR)
-ensure_directory_exists(REPORT_RESULTS_DIR)
-
-# Global mapping for short IDs
-category_short_map = {}
-vip_short_map = {}
-
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-
-def get_short_id(long_id, map_dict):
-    short_id = hashlib.md5(long_id.encode()).hexdigest()[:8]
-    map_dict[short_id] = long_id
-    return short_id
-
-def get_long_id(short_id, map_dict):
-    return map_dict.get(short_id, short_id)
-
-def clean_filename(filename):
-    """Clean filename to remove special characters and spaces"""
-    filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
-    filename = re.sub(r'[()\s\[\]]', '_', filename)
-    filename = re.sub(r'_+', '_', filename)
-    filename = filename.strip('_')
-    return filename
-
-def get_emoji_for_category(name):
-    emoji_map = {
-        'facebook': '📘', 'instagram': '📸', 'youtube': '▶️', 'tiktok': '🎵',
-        'twitter': '🐦', 'whatsapp': '💬', 'telegram': '✈️', 'linkedin': '🔗',
-        'hotmail': '📧', 'outlook': '📧', 'gmail': '📧', 'cookies': '🍪',
-        'friend': '👥', '2fa': '🔐'
-    }
-    name_lower = name.lower()
-    for key, emoji in emoji_map.items():
-        if key in name_lower:
-            return emoji
-    return '📁'
-
-def clean_number(value):
-    """Remove .0 from numbers if present"""
-    if value is None:
-        return ''
-    str_value = str(value)
-    if str_value.endswith('.0'):
-        return str_value[:-2]
-    return str_value
-
-def convert_excel_to_text(excel_path, output_dir=TEXT_DIR):
-    """
-    Convert Excel file to text format and save as .txt file
-    """
-    try:
-        wb = load_workbook(excel_path, data_only=True)
-        ws = wb.active
-        
-        base_name = os.path.splitext(os.path.basename(excel_path))[0]
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        text_filename = f"{base_name}_converted_{timestamp}.txt"
-        text_path = os.path.join(output_dir, text_filename)
-        
-        all_values = []
-        for row in ws.iter_rows(values_only=True):
-            if any(cell is not None and str(cell).strip() != '' for cell in row):
-                cleaned_row = [clean_number(cell) for cell in row]
-                line = '\t'.join(cleaned_row)
-                all_values.append(line)
-        
-        with open(text_path, 'w', encoding='utf-8') as f:
-            for line in all_values:
-                f.write(line + '\n')
-        
-        row_count = len(all_values)
-        return text_path, row_count
-        
-    except Exception as e:
-        logging.error(f"Error converting Excel to text: {e}")
-        return None, 0
-
-def get_existing_texts_from_all_orders():
-    """Get all unique texts from all orders (for duplicate checking)"""
-    orders = load_orders()
-    all_texts = set()
-    
-    for order_id, order in orders.items():
-        text_file_path = order.get('text_file_path')
-        if not text_file_path or not os.path.exists(text_file_path):
-            continue
-        
-        try:
-            with open(text_file_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-            
-            for line in content.split('\n'):
-                if line.strip():
-                    parts = line.strip().split('\t')
-                    for part in parts:
-                        if part.strip():
-                            all_texts.add(part.strip())
-        except Exception as e:
-            logging.error(f"Error reading order file {text_file_path}: {e}")
-            continue
-    
-    return all_texts
-
-def check_duplicates_in_text_file(text_file_path, existing_texts):
-    """Check if any text in the text file matches existing texts"""
-    try:
-        with open(text_file_path, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-        
-        new_lines = []
-        matched_values = []
-        removed_count = 0
-        
-        for line in lines:
-            if not line.strip():
-                continue
-            
-            parts = line.strip().split('\t')
-            should_remove = False
-            matched_parts = []
-            
-            for part in parts:
-                if part.strip() in existing_texts:
-                    should_remove = True
-                    matched_parts.append(part.strip())
-            
-            if should_remove:
-                removed_count += 1
-                matched_values.extend(matched_parts)
-            else:
-                new_lines.append(line)
-        
-        if removed_count == 0:
-            return text_file_path, 0, [], len(lines)
-        
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        cleaned_filename = f"duplicate_removed_{timestamp}.txt"
-        cleaned_path = os.path.join(TEXT_DIR, cleaned_filename)
-        
-        with open(cleaned_path, 'w', encoding='utf-8') as f:
-            for line in new_lines:
-                f.write(line)
-        
-        remaining_count = len(new_lines)
-        unique_matched = list(set(matched_values))
-        
-        return cleaned_path, removed_count, unique_matched, remaining_count
-        
-    except Exception as e:
-        logging.error(f"Error checking duplicates in text file: {e}")
-        return text_file_path, 0, [], 0
-
-def process_excel_file(file_path, user_id):
-    """Remove duplicates within the file itself"""
-    try:
-        wb = load_workbook(file_path)
-        ws = wb.active
-        
-        rows_to_delete = []
-        seen = set()
-        duplicate_values = []
-        total_rows = 0
-        
-        for row_idx, row in enumerate(ws.iter_rows(min_col=1, max_col=1, values_only=True), start=1):
-            if row[0] is not None:
-                value = str(row[0]).strip()
-                if value:
-                    total_rows += 1
-                    if value in seen:
-                        rows_to_delete.append(row_idx)
-                        duplicate_values.append(value)
-                    else:
-                        seen.add(value)
-        
-        if rows_to_delete:
-            for row_idx in sorted(rows_to_delete, reverse=True):
-                ws.delete_rows(row_idx)
-            
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            cleaned_filename = f"cleaned_{user_id}_{timestamp}.xlsx"
-            cleaned_path = os.path.join(PROCESSED_DIR, cleaned_filename)
-            wb.save(cleaned_path)
-            
-            remaining_rows = 0
-            for row in ws.iter_rows(values_only=True):
-                if row[0] is not None and str(row[0]).strip():
-                    remaining_rows += 1
-            
-            return cleaned_path, duplicate_values, remaining_rows
-        else:
-            return file_path, [], total_rows
-            
-    except Exception as e:
-        logging.error(f"Error processing Excel file: {e}")
-        return None, [], 0
-
-def load_data():
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return {}
-
-def save_data(data):
-    with open(DATA_FILE, 'w', encoding='utf-8') as f:
+def save_user_data():
+    with open("user_data.json", "w", encoding='utf-8') as f:
+        data = {
+            "balances": balances,
+            "user_sales": user_sales,
+            "user_deposits": user_deposits,
+            "user_info": user_info,
+            "total_deposits": total_deposits,
+            "total_sales": total_sales,
+            "transaction_log": transaction_log,
+            "categories": categories,
+            "prices": prices,
+            "sales_count_per_category": sales_count_per_category,
+            "manual_delivery_categories": MANUAL_DELIVERY_CATEGORIES,
+            "payment_methods": payment_methods,
+            "pending_deposits": pending_deposits,
+            "processed_trxids": list(processed_trxids)
+        }
         json.dump(data, f, ensure_ascii=False, indent=4)
-    # Upload to GitHub
-    upload_to_github(DATA_FILE, "data/user_data.json", "Update user data")
 
-def load_categories():
-    if os.path.exists(CATEGORIES_FILE):
-        with open(CATEGORIES_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return {
-        "facebook": {"name": "Facebook", "price": 10, "emoji": "📘"},
-        "instagram": {"name": "Instagram", "price": 15, "emoji": "📸"},
-        "youtube": {"name": "YouTube", "price": 20, "emoji": "▶️"},
-        "tiktok": {"name": "TikTok", "price": 25, "emoji": "🎵"}
+def log_sms(sms_text, trxid=None, amount=None, status="RECEIVED"):
+    """SMS লগ সংরক্ষণ"""
+    log_entry = {
+        "timestamp": datetime.now().isoformat(),
+        "sms_text": sms_text[:500],
+        "trxid": trxid,
+        "amount": amount,
+        "status": status
     }
-
-def save_categories(categories):
-    with open(CATEGORIES_FILE, 'w', encoding='utf-8') as f:
-        json.dump(categories, f, ensure_ascii=False, indent=4)
-    upload_to_github(CATEGORIES_FILE, "data/categories.json", "Update categories")
-
-def load_orders():
-    if os.path.exists(ORDERS_FILE):
-        with open(ORDERS_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return {}
-
-def save_orders(orders):
-    with open(ORDERS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(orders, f, ensure_ascii=False, indent=4)
-    upload_to_github(ORDERS_FILE, "data/orders.json", "Update orders")
-
-def load_vip_users():
-    if os.path.exists(VIP_USERS_FILE):
-        with open(VIP_USERS_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return {}
-
-def save_vip_users(vip_users):
-    with open(VIP_USERS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(vip_users, f, ensure_ascii=False, indent=4)
-    upload_to_github(VIP_USERS_FILE, "data/vip_users.json", "Update VIP users")
-
-def is_vip_user(user_id):
-    vip_users = load_vip_users()
-    return str(user_id) in vip_users
-
-def get_user_price(category_id, user_id):
-    categories = load_categories()
-    category = categories.get(category_id, {})
-    default_price = category.get('price', 0)
-    if is_vip_user(user_id):
-        vip_users = load_vip_users()
-        user_vip_data = vip_users.get(str(user_id), {})
-        vip_rates = user_vip_data.get('custom_rates', {})
-        if category_id in vip_rates:
-            return vip_rates[category_id]
-    return default_price
-
-def get_user_info(update, context):
-    user = update.effective_user
-    return {
-        "user_id": user.id,
-        "name": user.full_name if user.full_name else "N/A",
-        "username": f"@{user.username}" if user.username else "No username",
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    }
-
-def is_member(bot, user_id):
-    try:
-        member = bot.get_chat_member(chat_id=CHANNEL_USERNAME, user_id=user_id)
-        return member.status in ['member', 'administrator', 'creator']
-    except:
-        return False
-
-def format_order_for_admin(order):
-    rate_str = f"{order['rate']:.2f}".rstrip('0').rstrip('.') if isinstance(order['rate'], float) else str(order['rate'])
+    sms_log.append(log_entry)
     
-    text = f"━━━━━━━━━━━━━━━━━━━━\n"
-    text += f"🆔 Order: #{order['order_id']}\n"
-    text += f"⏰ Time: {order.get('order_time', 'N/A')}\n"
-    text += f"⭐️ Type: {order.get('user_type', 'Normal')}\n"
-    text += f"📛 Name: {order.get('user_name', 'N/A')}\n"
-    text += f"🔖 Username: {order.get('username', 'N/A')}\n"
-    text += f"📁 Category: {order['category']}\n"
-    text += f"🔢 Quantity: {order['quantity']}\n"
-    text += f"💰 Rate: {rate_str} TK\n"
-    text += f"💳 Payment: {order.get('payment_method', 'N/A')}\n"
-    text += f"📞 Number: {order.get('payment_number', 'N/A')}\n"
-    text += f"📊 Duplicates Removed: {order.get('duplicates_removed', 0)}\n"
-    if order.get('admin_note'):
-        text += f"📝 Note: {order['admin_note']}\n"
-    return text
+    # ফাইলে সংরক্ষণ
+    with open(SMS_LOG_FILE, "a", encoding='utf-8') as f:
+        f.write(f"[{log_entry['timestamp']}] STATUS: {status} | TRXID: {trxid} | Amount: {amount}\n")
+        f.write(f"SMS: {sms_text[:300]}\n")
+        f.write("-" * 50 + "\n")
+    
+    return log_entry
 
-def get_status_text(status):
-    status_map = {
-        'pending': '⏳ Pending',
-        'received': '✅ Received ✅',
-        'cancelled': '❌ Cancelled ❌',
-        'completed': '✅ Payment Confirmed ✅'
-    }
-    return status_map.get(status, '⏳ Pending')
-
-def get_main_menu_keyboard(user_id):
-    is_admin = user_id in ADMIN_IDS
-    keyboard = [
-        ["📝 File Submit"],
-        ["🆘 Admin Support"],
-        ["⚙️ Settings"]
-    ]
-    if is_admin:
-        keyboard.append(["👑 Admin Panel"])
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
-
-def get_categories_keyboard(user_id):
-    categories = load_categories()
-    keyboard = []
-    row = []
-    for cat_id, cat_info in categories.items():
-        price = get_user_price(cat_id, user_id) if is_vip_user(user_id) else cat_info['price']
-        price_str = f"{price:.2f}".rstrip('0').rstrip('.') if isinstance(price, float) else str(price)
-        button_text = f"{cat_info['emoji']} {cat_info['name']} - {price_str} TK"
-        if is_vip_user(user_id):
-            button_text += " ⭐"
-        row.append(button_text)
-        if len(row) == 2:
-            keyboard.append(row)
-            row = []
-    if row:
-        keyboard.append(row)
-    keyboard.append(["🔙 Back to Main"])
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
-
-def get_admin_panel_keyboard():
-    keyboard = [
-        ["📁 Manage Categories", "👑 VIP Users"],
-        ["🔍 Search User", "📢 Broadcast"],
-        ["📊 Report System"],
-        ["🔙 Back to Main"]
-    ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
-
-def start(update, context):
-    user_id = update.effective_user.id
-    if user_id in ADMIN_IDS:
-        user_data = load_data()
-        if str(user_id) not in user_data:
-            user_data[str(user_id)] = {"payment_method": "ADMIN", "payment_number": "ADMIN"}
-            save_data(user_data)
-        if not is_member(context.bot, user_id):
-            keyboard = [[InlineKeyboardButton("Join Channel", url=CHANNEL_URL)],
-                        [InlineKeyboardButton("Check Membership", callback_data="check_join")]]
-            update.message.reply_text(f"Please join our channel: {CHANNEL_USERNAME}", reply_markup=InlineKeyboardMarkup(keyboard))
-            return
-        show_main_menu(update, user_id)
-        return
-    
-    user_data = load_data()
-    if str(user_id) not in user_data:
-        user_data[str(user_id)] = {"payment_method": None, "payment_number": None}
-        save_data(user_data)
-    if not is_member(context.bot, user_id):
-        keyboard = [[InlineKeyboardButton("Join Channel", url=CHANNEL_URL)],
-                    [InlineKeyboardButton("Check Membership", callback_data="check_join")]]
-        update.message.reply_text(f"Please join our channel first: {CHANNEL_USERNAME}", reply_markup=InlineKeyboardMarkup(keyboard))
-        return
-    if user_data[str(user_id)]["payment_method"] is None:
-        ask_payment_method(update, context)
-    else:
-        show_main_menu(update, user_id)
-
-def ask_payment_method(update, context):
-    keyboard = [[InlineKeyboardButton("bKash", callback_data="method_bkash")],
-                [InlineKeyboardButton("Nagad", callback_data="method_nagad")],
-                [InlineKeyboardButton("Rocket", callback_data="method_rocket")],
-                [InlineKeyboardButton("Binance", callback_data="method_binance")]]
-    update.message.reply_text("Select your payment method:", reply_markup=InlineKeyboardMarkup(keyboard))
-
-def ask_payment_number(update, context, method):
-    context.user_data['temp_method'] = method
-    query = update.callback_query
-    query.message.reply_text(f"Enter your {method} number:")
-    context.user_data['waiting_for_payment_number'] = True
-
-def save_payment_number(update, context):
-    user_id = update.effective_user.id
-    number = update.message.text.strip()
-    method = context.user_data.get('temp_method')
-    if not method:
-        update.message.reply_text("Please use /start")
-        return
-    user_data = load_data()
-    user_data[str(user_id)]["payment_method"] = method
-    user_data[str(user_id)]["payment_number"] = number
-    save_data(user_data)
-    context.user_data['waiting_for_payment_number'] = False
-    context.user_data['temp_method'] = None
-    update.message.reply_text(f"{method} number {number} saved successfully!")
-    show_main_menu(update, user_id)
-
-def show_main_menu(update, user_id):
-    keyboard = get_main_menu_keyboard(user_id)
-    try:
-        if hasattr(update, 'callback_query') and update.callback_query:
-            update.callback_query.message.reply_text("🏠 Main Menu", reply_markup=keyboard)
-        else:
-            update.message.reply_text("🏠 Main Menu", reply_markup=keyboard)
-    except:
-        update.message.reply_text("🏠 Main Menu", reply_markup=keyboard)
-
-def show_categories_menu(update, user_id):
-    keyboard = get_categories_keyboard(user_id)
-    try:
-        if hasattr(update, 'callback_query') and update.callback_query:
-            update.callback_query.message.reply_text("📋 Select Service:", reply_markup=keyboard)
-        else:
-            update.message.reply_text("📋 Select Service:", reply_markup=keyboard)
-    except:
-        update.message.reply_text("📋 Select Service:", reply_markup=keyboard)
-
-def save_order_with_file(update, context, user_id, file, category_name, price, user_type):
-    categories = load_categories()
-    user_data = load_data()
-    user_info_full = get_user_info(update, context)
-    
-    file_name = file.file_name
-    file_id = file.file_id
-    
-    clean_name = clean_filename(file_name)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    unique_filename = f"{user_id}_{timestamp}_{clean_name}"
-    file_path = os.path.join(UPLOAD_DIR, unique_filename)
-    
-    try:
-        new_file = context.bot.get_file(file_id)
-        new_file.download(file_path)
-    except Exception as e:
-        logging.error(f"File download error: {e}")
-        update.message.reply_text("❌ Failed to download file. Please try again!")
-        return
-    
-    # STEP 1: Process the file (remove duplicates within the file)
-    processed_path, file_duplicates, total_count_after_file_clean = process_excel_file(file_path, user_id)
-    
-    if processed_path is None:
-        update.message.reply_text("❌ Failed to process file. Please try again!")
-        return
-    
-    # STEP 2: Convert Excel to Text
-    text_path, text_row_count = convert_excel_to_text(processed_path)
-    
-    if text_path is None:
-        update.message.reply_text("❌ Failed to convert file to text. Please try again!")
-        return
-    
-    # STEP 3: Check for duplicates with existing orders in the TEXT file
-    existing_texts = get_existing_texts_from_all_orders()
-    cleaned_text_path, removed_count, matched_values, remaining_count = check_duplicates_in_text_file(text_path, existing_texts)
-    
-    # If all data was duplicate (file became empty)
-    if remaining_count == 0 and removed_count > 0:
-        duplicates_list = "\n".join([f"{i+1}. {val}" for i, val in enumerate(matched_values[:10])])
-        if len(matched_values) > 10:
-            duplicates_list += f"\n... and {len(matched_values) - 10} more"
-        
-        update.message.reply_text(
-            f"⚠️ ALL DATA ALREADY EXISTS!\n\n"
-            f"🔴 Your file contains {removed_count} entries that already exist in our system.\n\n"
-            f"📋 Duplicate values:\n{duplicates_list}\n\n"
-            f"💡 Please upload a file with NEW data only."
-        )
-        try:
-            os.remove(file_path)
-            os.remove(processed_path)
-            os.remove(text_path)
-            if cleaned_text_path != text_path:
-                os.remove(cleaned_text_path)
-        except:
-            pass
-        context.user_data.clear()
-        return
-    
-    # If no data left after processing
-    if remaining_count == 0:
-        update.message.reply_text(
-            "⚠️ No valid data found in your file!\n\n"
-            "💡 Please upload a file with valid data."
-        )
-        try:
-            os.remove(file_path)
-            os.remove(processed_path)
-            os.remove(text_path)
-            if cleaned_text_path != text_path:
-                os.remove(cleaned_text_path)
-        except:
-            pass
-        context.user_data.clear()
-        return
-    
-    # Use the cleaned text file if duplicates were removed, otherwise use original
-    final_text_path = cleaned_text_path if removed_count > 0 else text_path
-    
-    # Count final rows
-    with open(final_text_path, 'r', encoding='utf-8') as f:
-        final_rows = len(f.readlines())
-    
-    orders = load_orders()
-    order_id = str(len(orders) + 1)
-    price_str = f"{price:.2f}".rstrip('0').rstrip('.') if isinstance(price, float) else str(price)
-    
-    # Upload files to GitHub
-    github_files = {}
-    
-    # Upload processed Excel file
-    github_excel_path = f"orders/order_{order_id}/data.xlsx"
-    success, excel_url = upload_to_github(processed_path, github_excel_path, f"Add order #{order_id} Excel data")
-    if success:
-        github_files['excel'] = excel_url
-    
-    # Upload text file
-    github_text_path = f"orders/order_{order_id}/data.txt"
-    success, text_url = upload_to_github(final_text_path, github_text_path, f"Add order #{order_id} text data")
-    if success:
-        github_files['text'] = text_url
-    
-    # Upload original file
-    github_original_path = f"orders/order_{order_id}/original_{os.path.basename(file_path)}"
-    success, original_url = upload_to_github(file_path, github_original_path, f"Add order #{order_id} original file")
-    if success:
-        github_files['original'] = original_url
-    
-    order_data = {
-        "order_id": order_id,
+def log_deposit(user_id, amount, trxid, status="AUTO", method=None):
+    """ডিপোজিট লগ সংরক্ষণ"""
+    log_entry = {
+        "timestamp": datetime.now().isoformat(),
         "user_id": user_id,
-        "user_name": user_info_full["name"],
-        "username": user_info_full["username"],
-        "order_time": user_info_full["timestamp"],
-        "category": category_name,
-        "quantity": final_rows,
-        "rate": price,
-        "file_name": file_name,
-        "file_path": processed_path,
-        "text_file_path": final_text_path,
-        "original_file_path": file_path,
-        "file_id": file_id,
-        "payment_method": user_data.get(str(user_id), {}).get('payment_method'),
-        "payment_number": user_data.get(str(user_id), {}).get('payment_number'),
-        "status": "pending",
-        "user_type": user_type,
-        "duplicates_removed": len(file_duplicates),
-        "admin_note": "",
-        "matched_count": 0,
-        "matched_data": [],
-        "existing_duplicates_removed": removed_count,
-        "existing_duplicates_values": matched_values,
-        "github_urls": github_files
+        "amount": amount,
+        "trxid": trxid,
+        "status": status,
+        "method": method
     }
     
-    orders[order_id] = order_data
-    save_orders(orders)
+    with open(DEPOSIT_LOG_FILE, "a", encoding='utf-8') as f:
+        f.write(f"[{log_entry['timestamp']}] {status} | User: {user_id} | Amount: {amount} | TRXID: {trxid}\n")
+        f.write("-" * 50 + "\n")
     
-    current_time = datetime.now().strftime("%d-%m-%Y %I:%M %p")
+    return log_entry
+
+load_user_data()
+
+# ================ HELPERS ================
+def get_txt_path(main_cat: str, sub_cat: str) -> str:
+    file_name = f"{main_cat}_{sub_cat}.txt".replace(" ", "_").replace("-", "_")
+    return os.path.join(TXT_DIR, file_name)
+
+def get_excel_path(main_cat: str, sub_cat: str) -> str:
+    file_name = f"{main_cat}_{sub_cat}.xlsx".replace(" ", "_").replace("-", "_")
+    return os.path.join(EXCEL_DIR, file_name)
+
+def ensure_txt_file(main_cat: str, sub_cat: str):
+    path = get_txt_path(main_cat, sub_cat)
+    if not os.path.exists(path):
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write("")
+
+def add_items_from_txt(main_cat: str, sub_cat: str, txt_content: str):
+    ensure_txt_file(main_cat, sub_cat)
+    path = get_txt_path(main_cat, sub_cat)
+    with open(path, 'a', encoding='utf-8') as f:
+        f.write(txt_content + '\n')
+
+def pop_items_from_txt(main_cat: str, sub_cat: str, qty: int) -> list:
+    path = get_txt_path(main_cat, sub_cat)
+    if not os.path.exists(path):
+        return []
     
-    # Build duplicate removal message
-    existing_duplicates_text = ""
-    if removed_count > 0:
-        existing_duplicates_text = f"\n\n🔴 Existing Data Removed ({removed_count} rows):\n"
-        existing_duplicates_text += f"These values already exist in previous orders:\n"
-        for i, val in enumerate(matched_values[:10], 1):
-            existing_duplicates_text += f"{i}. {val}\n"
-        if len(matched_values) > 10:
-            existing_duplicates_text += f"... and {len(matched_values) - 10} more\n"
-    else:
-        existing_duplicates_text = f"\n\n✅ No existing data found!"
+    with open(path, 'r', encoding='utf-8') as f:
+        items = [line.strip() for line in f.readlines() if line.strip()]
     
-    file_duplicates_text = ""
-    if file_duplicates:
-        file_duplicates_text = f"\n\n🔴 Duplicates Removed from file ({len(file_duplicates)} rows):\n"
-        for i, dup in enumerate(file_duplicates[:10], 1):
-            file_duplicates_text += f"{i}. {dup}\n"
-        if len(file_duplicates) > 10:
-            file_duplicates_text += f"... and {len(file_duplicates) - 10} more\n"
-        file_duplicates_text += f"\n✅ Total unique entries: {final_rows}"
-    else:
-        file_duplicates_text = f"\n\n✅ No duplicates found in file!\n✅ Total entries: {final_rows}"
+    if len(items) < qty:
+        return []
     
-    # GitHub links
-    github_links = ""
-    if github_files:
-        github_links = "\n\n📎 **GitHub Backups:**"
-        if 'excel' in github_files:
-            github_links += f"\n📊 Excel: [View on GitHub]({github_files['excel']})"
-        if 'text' in github_files:
-            github_links += f"\n📝 Text: [View on GitHub]({github_files['text']})"
-        if 'original' in github_files:
-            github_links += f"\n📁 Original: [View on GitHub]({github_files['original']})"
+    result = items[:qty]
+    remaining_items = items[qty:]
     
-    user_text = f"━━━━━━━━━━━━━━━━━━━━\n"
-    user_text += f"✅ ORDER PROCESSED\n"
-    user_text += f"━━━━━━━━━━━━━━━━━━━━\n\n"
-    user_text += f"🆔 Order: #{order_id}\n"
-    user_text += f"⏰ Time: {user_info_full['timestamp']}\n"
-    user_text += f"⭐️ Type: {user_type}\n"
-    user_text += f"📛 Name: {user_info_full['name']}\n"
-    user_text += f"🔖 Username: {user_info_full['username']}\n"
-    user_text += f"📁 Category: {category_name}\n"
-    user_text += f"🔢 Quantity: {final_rows}\n"
-    user_text += f"💰 Rate: {price_str} TK\n"
-    user_text += f"💳 Payment: {user_data.get(str(user_id), {}).get('payment_method', 'N/A')}\n"
-    user_text += f"📞 Number: {user_data.get(str(user_id), {}).get('payment_number', 'N/A')}\n"
-    user_text += f"📊 Status: ⏳ Pending\n"
-    user_text += f"🕐 Submitted: {current_time}"
-    user_text += existing_duplicates_text
-    user_text += file_duplicates_text
-    user_text += github_links
-    user_text += f"\n\n📎 Your file has been submitted and backed up to GitHub!"
+    with open(path, 'w', encoding='utf-8') as f:
+        for item in remaining_items:
+            f.write(item + '\n')
     
-    keyboard = get_main_menu_keyboard(user_id)
-    update.message.reply_text(user_text, reply_markup=keyboard, parse_mode='Markdown')
+    return result
+
+def count_items(main_cat: str, sub_cat: str) -> int:
+    path = get_txt_path(main_cat, sub_cat)
+    if not os.path.exists(path):
+        return 0
+    with open(path, 'r', encoding='utf-8') as f:
+        items = [line.strip() for line in f.readlines() if line.strip()]
+    return len(items)
+
+def create_xlsx_file(items: list, file_name: str) -> io.BytesIO:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Items"
+    for item in items:
+        ws.append([item])
     
-    for admin_id in ADMIN_IDS:
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+    return buffer
+
+def get_total_stock(main_cat: str) -> int:
+    total = 0
+    if main_cat in categories:
+        for sub_cat in categories[main_cat]:
+            total += count_items(main_cat, sub_cat)
+    return total
+
+def get_report_summary(transactions, days):
+    end_timestamp = time.time()
+    start_timestamp = end_timestamp - (days * 24 * 60 * 60)
+    
+    daily_deposits = 0
+    daily_sales = 0
+    
+    for trans_type, _, amount, timestamp in transactions:
+        if start_timestamp <= timestamp <= end_timestamp:
+            if trans_type == 'deposit':
+                daily_deposits += amount
+            elif trans_type == 'sale':
+                daily_sales += amount
+    return daily_deposits, daily_sales
+    
+def get_user_transactions(user_id, transactions):
+    return [t for t in transactions if t[1] == user_id]
+
+# ================ SMS AUTO DEPOSIT PROCESSOR ================
+def extract_trxid_from_bkash_sms(sms_text: str):
+    """
+    bKash SMS থেকে TRXID বের করে
+    বিশেষ করে আপনার দেখানো ফরম্যাটের জন্য:
+    "TrxID DFQ9POCKRB at 26/06/2026"
+    """
+    trxid = None
+    
+    print(f"\n🔍 SMS থেকে TRXID বের করা হচ্ছে:")
+    print(f"SMS: {sms_text}")
+    
+    # প্রথমে TrxID খুঁজুন - আপনার দেখানো ফরম্যাটের জন্য
+    # "TrxID DFQ9POCKRB" - এখানে space আছে
+    match = re.search(r'TrxID\s+([A-Z0-9]{6,})', sms_text, re.IGNORECASE)
+    if match:
+        trxid = match.group(1).strip().upper()
+        print(f"✅ TRXID পাওয়া গেছে (TrxID): {trxid}")
+        return trxid
+    
+    # যদি না পায়, তাহলে TRXID খুঁজুন
+    match = re.search(r'TRXID\s+([A-Z0-9]{6,})', sms_text, re.IGNORECASE)
+    if match:
+        trxid = match.group(1).strip().upper()
+        print(f"✅ TRXID পাওয়া গেছে (TRXID): {trxid}")
+        return trxid
+    
+    # অন্য প্যাটার্ন
+    patterns = [
+        r'TrxID[:\s]*([A-Z0-9]{6,})',
+        r'TRXID[:\s]*([A-Z0-9]{6,})',
+        r'ট্রানজেকশন আইডি[:\s]*([A-Z0-9]{6,})',
+        r'আইডি[:\s]*([A-Z0-9]{6,})',
+        r'ID[:\s]*([A-Z0-9]{6,})',
+        r'([A-Z0-9]{8,12})(?:\s+at\s+|\s*$)',
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, sms_text, re.IGNORECASE)
+        if match:
+            potential_trxid = match.group(1).strip().upper()
+            if len(potential_trxid) >= 6 and re.match(r'^[A-Z0-9]+$', potential_trxid):
+                trxid = potential_trxid
+                print(f"✅ TRXID পাওয়া গেছে: {trxid}")
+                return trxid
+    
+    print(f"⚠️ TRXID বের করতে ব্যর্থ")
+    return None
+
+def extract_amount_from_bkash_sms(sms_text: str):
+    """
+    bKash SMS থেকে পরিমাণ বের করে
+    বিশেষ করে আপনার দেখানো ফরম্যাটের জন্য:
+    "You have received Tk 50.00 from 01920525242"
+    """
+    amount = None
+    
+    print(f"\n🔍 SMS থেকে পরিমাণ বের করা হচ্ছে:")
+    print(f"SMS: {sms_text}")
+    
+    # প্রথমে "received Tk" প্যাটার্ন চেক করুন - আপনার দেখানো ফরম্যাট
+    match = re.search(r'received\s+Tk\s*([\d,]+\.?\d*)', sms_text, re.IGNORECASE)
+    if match:
+        amount_str = match.group(1).replace(',', '').strip()
         try:
-            order_text = format_order_for_admin(order_data)
-            keyboard_inline = [
-                [InlineKeyboardButton("✅ Receive", callback_data=f"receive_{order_id}"),
-                 InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{order_id}")],
-                [InlineKeyboardButton("💳 Payment Complete", callback_data=f"complete_{order_id}")],
-                [InlineKeyboardButton("✏️ Edit Note", callback_data=f"note_{order_id}")]
-            ]
-            
-            with open(final_text_path, 'r', encoding='utf-8') as f:
-                text_content = f.read()
-            
-            text_file_io = io.BytesIO(text_content.encode('utf-8'))
-            text_file_io.name = f"order_{order_id}_data.txt"
-            
-            note_display = ""
-            if order_data.get('admin_note'):
-                note_display = f"\n\n📝 Note: {order_data['admin_note']}"
-            
-            github_backup = ""
-            if github_files:
-                github_backup = f"\n\n📎 GitHub Backups:"
-                for key, url in github_files.items():
-                    github_backup += f"\n• {key}: {url}"
-            
-            caption = f"📦 New Order #{order_id}\n\n{order_text}\n\n📊 Existing Duplicates Removed: {removed_count}\n📊 File Duplicates Removed: {len(file_duplicates)}\n📁 Data: {final_rows} rows (cleaned){note_display}{github_backup}"
-            
-            context.bot.send_document(
-                chat_id=admin_id,
-                document=text_file_io,
-                filename=f"order_{order_id}_data.txt",
-                caption=caption,
-                reply_markup=InlineKeyboardMarkup(keyboard_inline)
-            )
-            
-        except Exception as e:
-            logging.error(f"Error sending text file to admin {admin_id}: {e}")
-    
-    context.user_data.clear()
-
-def handle_file_upload(update, context):
-    user_id = update.effective_user.id
-    file = update.message.document
-    
-    file_name = file.file_name.lower()
-    
-    if user_id in ADMIN_IDS and context.user_data.get('awaiting_report'):
-        if file_name.endswith('.txt'):
-            handle_text_report_upload(update, context)
-        else:
-            update.message.reply_text("❌ Please upload a .txt file for report!")
-        return
-    
-    if not file_name.endswith(('.xlsx', '.xls')):
-        update.message.reply_text("❌ Please upload a valid Excel file (.xlsx or .xls)!")
-        return
-    
-    if 'selected_category' not in context.user_data:
-        update.message.reply_text("❌ Please select a category first from the menu!")
-        return
-    
-    cat_id = context.user_data.get('selected_category')
-    categories = load_categories()
-    category = categories.get(cat_id)
-    
-    if not category:
-        update.message.reply_text("❌ Category not found! Please select again.")
-        return
-    
-    price = get_user_price(cat_id, user_id)
-    user_type = "VIP" if is_vip_user(user_id) else "Normal"
-    
-    save_order_with_file(update, context, user_id, file, category['name'], price, user_type)
-
-def handle_text_report_upload(update, context):
-    user_id = update.effective_user.id
-    file = update.message.document
-    
-    try:
-        new_file = context.bot.get_file(file.file_id)
-        file_content = new_file.download_as_bytearray()
-        
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        report_filename = f"report_{user_id}_{timestamp}.txt"
-        report_path = os.path.join(REPORT_DIR, report_filename)
-        
-        with open(report_path, 'wb') as f:
-            f.write(file_content)
-        
-        # Upload report to GitHub
-        github_report_path = f"reports/report_{timestamp}.txt"
-        upload_to_github(report_path, github_report_path, f"Add report {timestamp}")
-        
-        update.message.reply_text("⏳ Processing report... Please wait.")
-        
-        result = process_text_report(update, context, report_path, user_id)
-        
-        if result:
-            report_id, matched_orders, total_report_entries = result
-            
-            if matched_orders:
-                report_result = {
-                    "report_id": report_id,
-                    "report_file": report_filename,
-                    "uploaded_by": user_id,
-                    "upload_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "total_report_entries": total_report_entries,
-                    "matched_orders_count": len(matched_orders),
-                    "matched_orders": matched_orders
-                }
-                
-                result_file = os.path.join(REPORT_RESULTS_DIR, f"result_{report_id}.json")
-                with open(result_file, 'w', encoding='utf-8') as f:
-                    json.dump(report_result, f, ensure_ascii=False, indent=4)
-                
-                # Upload result to GitHub
-                github_result_path = f"reports/results/result_{report_id}.json"
-                upload_to_github(result_file, github_result_path, f"Add report result {report_id}")
-            
-            # Continue with report processing
-            if matched_orders:
-                update.message.reply_text(
-                    f"✅ Report Processed!\n\n"
-                    f"📊 Total Report Entries: {total_report_entries}\n"
-                    f"✅ Orders with Matches: {len(matched_orders)}\n\n"
-                    f"📋 Orders with matches are shown below:"
-                )
-                
-                for result in matched_orders:
-                    order_id = result['order_id']
-                    orders = load_orders()
-                    order = orders.get(order_id, {})
-                    
-                    if order:
-                        order_text = format_order_for_admin(order)
-                        current_time = datetime.now().strftime("%d-%m-%Y %I:%M %p")
-                        
-                        matched_count = result['matched_count']
-                        rate = order.get('rate', 0)
-                        total_price = matched_count * rate
-                        
-                        status = order.get('status', 'pending')
-                        if status == 'received':
-                            receive_btn = InlineKeyboardButton("✅ Received ✅", callback_data="done")
-                        else:
-                            receive_btn = InlineKeyboardButton("✅ Receive", callback_data=f"receive_{order_id}")
-                        
-                        if status == 'cancelled':
-                            cancel_btn = InlineKeyboardButton("❌ Cancelled ❌", callback_data="done")
-                        else:
-                            cancel_btn = InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{order_id}")
-                        
-                        if status == 'completed':
-                            complete_btn = InlineKeyboardButton("✅ Payment Confirmed ✅", callback_data="done")
-                        else:
-                            complete_btn = InlineKeyboardButton("💳 Payment Complete", callback_data=f"complete_{order_id}")
-                        
-                        keyboard_inline = [
-                            [receive_btn, cancel_btn],
-                            [complete_btn],
-                            [InlineKeyboardButton("✏️ Edit Note", callback_data=f"note_{order_id}")]
-                        ]
-                        
-                        try:
-                            text_file_path = order.get('text_file_path')
-                            if text_file_path and os.path.exists(text_file_path):
-                                with open(text_file_path, 'r', encoding='utf-8') as f:
-                                    text_content = f.read()
-                                
-                                text_file_io = io.BytesIO(text_content.encode('utf-8'))
-                                text_file_io.name = f"order_{order_id}_data.txt"
-                                
-                                caption = (
-                                    f"📦 Order #{order_id} (Matched in Report)\n"
-                                    f"🕐 {current_time}\n\n"
-                                    f"{order_text}\n\n"
-                                    f"📊 Status: {get_status_text(status)}\n"
-                                    f"✅ Matched: {matched_count} entries\n"
-                                    f"💰 Rate: {rate} TK\n"
-                                    f"💵 Total Price: {total_price} TK"
-                                )
-                                
-                                update.message.reply_document(
-                                    document=text_file_io,
-                                    filename=f"order_{order_id}_data.txt",
-                                    caption=caption,
-                                    reply_markup=InlineKeyboardMarkup(keyboard_inline)
-                                )
-                            else:
-                                caption = (
-                                    f"📦 Order #{order_id} (Matched in Report)\n"
-                                    f"🕐 {current_time}\n\n"
-                                    f"{order_text}\n\n"
-                                    f"📊 Status: {get_status_text(status)}\n"
-                                    f"✅ Matched: {matched_count} entries\n"
-                                    f"💰 Rate: {rate} TK\n"
-                                    f"💵 Total Price: {total_price} TK"
-                                )
-                                
-                                update.message.reply_text(
-                                    caption,
-                                    reply_markup=InlineKeyboardMarkup(keyboard_inline)
-                                )
-                        except Exception as e:
-                            logging.error(f"Error sending matched order {order_id}: {e}")
-                            caption = f"📦 Order #{order_id} (Matched in Report)\n\n{order_text}\n\n📊 Status: {get_status_text(status)}"
-                            update.message.reply_text(
-                                caption,
-                                reply_markup=InlineKeyboardMarkup(keyboard_inline)
-                            )
-            else:
-                update.message.reply_text(
-                    f"✅ Report Processed!\n\n"
-                    f"📊 Total Report Entries: {total_report_entries}\n"
-                    f"❌ No matches found in any order.\n\n"
-                    f"💡 Tip: Make sure the text file contains data that matches any user's order file content."
-                )
-        else:
-            update.message.reply_text("❌ Failed to process report file!")
-        
-        context.user_data['awaiting_report'] = False
-        
-    except Exception as e:
-        logging.error(f"Error in handle_text_report_upload: {e}")
-        update.message.reply_text(f"❌ Error processing report: {str(e)}")
-        context.user_data['awaiting_report'] = False
-
-def process_text_report(update, context, report_path, admin_id):
-    """Process text file report and match with all orders"""
-    try:
-        with open(report_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-        
-        report_values = []
-        for line in content.split('\n'):
-            if line.strip():
-                parts = re.split(r'[\t,\s]+', line.strip())
-                for part in parts:
-                    if part.strip():
-                        report_values.append(part.strip())
-        
-        if not report_values:
-            update.message.reply_text("❌ Report file is empty!")
-            return None
-        
-        report_set = set(report_values)
-        total_report_entries = len(report_set)
-        
-        orders = load_orders()
-        matched_orders = []
-        
-        for order_id, order in orders.items():
-            text_file_path = order.get('text_file_path')
-            if not text_file_path or not os.path.exists(text_file_path):
-                continue
-            
-            try:
-                with open(text_file_path, 'r', encoding='utf-8') as f:
-                    order_content = f.read()
-            except Exception as e:
-                logging.error(f"Error reading order file {text_file_path}: {e}")
-                continue
-            
-            order_values = []
-            for line in order_content.split('\n'):
-                if line.strip():
-                    parts = line.strip().split('\t')
-                    for part in parts:
-                        if part.strip():
-                            order_values.append(part.strip())
-            
-            if not order_values:
-                continue
-            
-            order_counter = Counter(order_values)
-            matched_values = []
-            
-            for val in report_set:
-                if val in order_counter:
-                    matched_values.append(val)
-            
-            if len(matched_values) >= 1:
-                matched_count = len(matched_values)
-                rate = order.get('rate', 0)
-                total_price = rate * matched_count
-                
-                matched_orders.append({
-                    "order_id": order_id,
-                    "user_name": order.get('user_name', 'N/A'),
-                    "username": order.get('username', 'N/A'),
-                    "category": order.get('category', 'N/A'),
-                    "quantity": order.get('quantity', 0),
-                    "matched_count": matched_count,
-                    "rate": rate,
-                    "total_price": total_price,
-                    "order_time": order.get('order_time', 'N/A'),
-                    "status": order.get('status', 'pending'),
-                    "text_file_path": text_file_path,
-                    "order_data": order
-                })
-        
-        matched_orders.sort(key=lambda x: x['matched_count'], reverse=True)
-        
-        report_id = hashlib.md5(f"{admin_id}_{datetime.now().isoformat()}".encode()).hexdigest()[:8]
-        
-        return report_id, matched_orders, total_report_entries
-        
-    except Exception as e:
-        logging.error(f"Error processing text report: {e}")
-        update.message.reply_text(f"❌ Error processing report: {str(e)}")
-        return None
-
-def show_support_menu(update, user_id):
-    keyboard = get_main_menu_keyboard(user_id)
-    update.message.reply_text(
-        "🆘 Admin Support\n\n"
-        "For any assistance, please contact:\n"
-        "👤 @Rubel_QSB\n\n"
-        "Or send a message to our support team.",
-        reply_markup=keyboard
-    )
-
-def show_setting_menu(update, user_id):
-    user_data = load_data()
-    pm = user_data.get(str(user_id), {})
-    vip_status = "✅ VIP Member ⭐" if is_vip_user(user_id) else "Normal User"
-    
-    keyboard = [
-        ["💳 Change Payment"],
-        ["🔙 Back to Main"]
-    ]
-    reply_keyboard = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
-    
-    update.message.reply_text(
-        f"⚙️ Settings\n\n"
-        f"👤 {vip_status}\n\n"
-        f"💳 Payment: {pm.get('payment_method', 'N/A')}\n"
-        f"📞 Number: {pm.get('payment_number', 'N/A')}",
-        reply_markup=reply_keyboard
-    )
-
-def show_admin_panel(update, user_id):
-    keyboard = get_admin_panel_keyboard()
-    update.message.reply_text("👑 Admin Panel", reply_markup=keyboard)
-
-def show_admin_categories(update, user_id):
-    categories = load_categories()
-    keyboard = []
-    row = []
-    for cat_id, cat_info in categories.items():
-        price_str = f"{cat_info['price']:.2f}".rstrip('0').rstrip('.') if isinstance(cat_info['price'], float) else str(cat_info['price'])
-        short_id = get_short_id(cat_id, category_short_map)
-        button_text = f"✏️ {cat_info['emoji']} {cat_info['name']} - {price_str} TK"
-        row.append(button_text)
-        if len(row) == 2:
-            keyboard.append(row)
-            row = []
-    if row:
-        keyboard.append(row)
-    keyboard.append(["➕ Add New Category"])
-    keyboard.append(["🔙 Back to Admin Panel"])
-    reply_keyboard = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
-    
-    update.message.reply_text(
-        "📁 Manage Categories\n\n"
-        "✨ Click on a category to edit\n"
-        "💰 Decimal rates supported\n\n"
-        "➕ Add New Category - to add new",
-        reply_markup=reply_keyboard
-    )
-
-def show_admin_vip(update, user_id):
-    keyboard = [
-        ["➕ Add VIP", "📋 VIP List"],
-        ["✏️ Edit Rates", "🗑 Remove VIP"],
-        ["🔙 Back to Admin Panel"]
-    ]
-    reply_keyboard = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
-    update.message.reply_text("👑 VIP User Management", reply_markup=reply_keyboard)
-
-def show_report_system(update, user_id):
-    keyboard = [
-        ["📤 Upload Report"],
-        ["📋 View Reports"],
-        ["🔙 Back to Admin Panel"]
-    ]
-    reply_keyboard = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
-    update.message.reply_text(
-        "📊 Report System\n\n"
-        "Upload a .txt file to match with user orders.\n"
-        "The system will compare ALL text in the report file\n"
-        "with ALL text in each order file.\n\n"
-        "✅ Each unique match counts as 1\n"
-        "💵 Total = Matched × Rate\n\n"
-        "You can manage orders directly from results.",
-        reply_markup=reply_keyboard
-    )
-
-def start_report_upload(update, context):
-    context.user_data['awaiting_report'] = True
-    keyboard = [
-        ["📤 Upload Report"],
-        ["📋 View Reports"],
-        ["🔙 Back to Admin Panel"]
-    ]
-    reply_keyboard = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
-    update.message.reply_text(
-        "📤 Upload Report File\n\n"
-        "Please upload a .txt file containing the report data.\n\n"
-        "The system will compare ALL text from the report file\n"
-        "with ALL text from each order file.\n"
-        "✅ Each unique match counts as 1\n"
-        "💵 Total = Matched × Rate\n\n"
-        "⚠️ Only .txt files are accepted.",
-        reply_markup=reply_keyboard
-    )
-
-def view_reports(update, user_id):
-    report_files = os.listdir(REPORT_RESULTS_DIR)
-    keyboard = [
-        ["📤 Upload Report"],
-        ["📋 View Reports"],
-        ["🔙 Back to Admin Panel"]
-    ]
-    reply_keyboard = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
-    
-    if not report_files:
-        update.message.reply_text("📋 No reports found.", reply_markup=reply_keyboard)
-        return
-    
-    text = "📋 Recent Reports:\n\n"
-    for file in sorted(report_files, reverse=True)[:10]:
-        try:
-            with open(os.path.join(REPORT_RESULTS_DIR, file), 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            report_id = data.get('report_id', 'Unknown')
-            matched = data.get('matched_orders_count', 0)
-            total = data.get('total_report_entries', 0)
-            time = data.get('upload_time', 'Unknown')
-            text += f"📊 Report #{report_id}\n"
-            text += f"   Matched: {matched} orders\n"
-            text += f"   Entries: {total}\n"
-            text += f"   Time: {time}\n\n"
+            amount = int(float(amount_str))
+            print(f"✅ পরিমাণ পাওয়া গেছে (received Tk): {amount} টাকা")
+            return amount
         except:
-            continue
+            pass
     
-    update.message.reply_text(text, reply_markup=reply_keyboard)
-
-def show_vip_list(update, user_id):
-    vip_users = load_vip_users()
-    keyboard = [
-        ["➕ Add VIP", "📋 VIP List"],
-        ["✏️ Edit Rates", "🗑 Remove VIP"],
-        ["🔙 Back to Admin Panel"]
-    ]
-    reply_keyboard = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
-    
-    if not vip_users:
-        update.message.reply_text("📋 No VIP users found.", reply_markup=reply_keyboard)
-        return
-    
-    text = "📋 VIP List:\n\n"
-    for uid, info in vip_users.items():
-        text += f"━━━━━━━━━━━━━━━━━━━━\n"
-        text += f"🆔 ID: {uid}\n"
-        text += f"👤 Name: {info.get('name', 'N/A')}\n"
-        text += f"📅 Added: {info.get('added_time', 'N/A')}\n"
-        if info.get('custom_rates'):
-            text += f"⭐ Custom rates:\n"
-            for cat_id, r in info['custom_rates'].items():
-                text += f"   • {cat_id}: {r} TK\n"
-        text += "\n"
-    
-    if len(text) > 4000:
-        text = text[:4000] + "\n\n... (truncated)"
-    
-    update.message.reply_text(text, reply_markup=reply_keyboard)
-
-def edit_vip_rates_list(update, context):
-    vip_users = load_vip_users()
-    keyboard = [
-        ["➕ Add VIP", "📋 VIP List"],
-        ["✏️ Edit Rates", "🗑 Remove VIP"],
-        ["🔙 Back to Admin Panel"]
-    ]
-    reply_keyboard = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
-    
-    if not vip_users:
-        update.message.reply_text("No VIP users found.", reply_markup=reply_keyboard)
-        return
-    
-    text = "👑 Select a VIP user to edit rates:\n\n"
-    for uid, info in vip_users.items():
-        name = info.get('name', 'Unknown')
-        text += f"🆔 {uid} - {name}\n"
-        text += f"   Send: /edit_vip_{uid}\n\n"
-    
-    update.message.reply_text(text, reply_markup=reply_keyboard)
-
-def remove_vip_start(update, context):
-    vip_users = load_vip_users()
-    keyboard = [
-        ["➕ Add VIP", "📋 VIP List"],
-        ["✏️ Edit Rates", "🗑 Remove VIP"],
-        ["🔙 Back to Admin Panel"]
-    ]
-    reply_keyboard = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
-    
-    if not vip_users:
-        update.message.reply_text("No VIP users found.", reply_markup=reply_keyboard)
-        return
-    
-    text = "🗑 Select a VIP user to remove:\n\n"
-    for uid, info in vip_users.items():
-        name = info.get('name', 'Unknown')
-        text += f"🆔 {uid} - {name}\n"
-        text += f"   Send: /remove_vip_{uid}\n\n"
-    
-    update.message.reply_text(text, reply_markup=reply_keyboard)
-
-def add_vip_start(update, context):
-    keyboard = [
-        ["➕ Add VIP", "📋 VIP List"],
-        ["✏️ Edit Rates", "🗑 Remove VIP"],
-        ["🔙 Back to Admin Panel"]
-    ]
-    reply_keyboard = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
-    update.message.reply_text(
-        "➕ Add VIP\n\n"
-        "Send User ID to add as VIP:\n"
-        "Example: `8555327754`",
-        reply_markup=reply_keyboard
-    )
-
-def process_add_vip(update, context, user_id_text):
-    if not user_id_text.isdigit():
-        update.message.reply_text("❌ Send numeric User ID!")
-        return
-    
-    vip_users = load_vip_users()
-    if user_id_text in vip_users:
-        update.message.reply_text(f"❌ User {user_id_text} is already VIP!")
-        return
-    
-    vip_users[user_id_text] = {
-        "user_id": user_id_text,
-        "name": "Unknown",
-        "username": "Unknown",
-        "added_by": str(update.effective_user.id),
-        "added_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "custom_rates": {}
-    }
-    save_vip_users(vip_users)
-    update.message.reply_text(f"✅ VIP Added: {user_id_text}")
-    show_vip_rates_menu(update, context, user_id_text)
-
-def show_vip_rates_menu(update, context, user_id_text):
-    categories = load_categories()
-    keyboard = []
-    row = []
-    for cat_id, cat_info in categories.items():
-        button_text = f"{cat_info['emoji']} {cat_info['name']}"
-        row.append(button_text)
-        if len(row) == 2:
-            keyboard.append(row)
-            row = []
-    if row:
-        keyboard.append(row)
-    keyboard.append(["🔙 Back to VIP Management"])
-    reply_keyboard = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
-    
-    context.user_data['vip_rate_user'] = user_id_text
-    update.message.reply_text(
-        f"👑 Set Rates for VIP {user_id_text}\n\n"
-        f"Click on a category to set custom rate:",
-        reply_markup=reply_keyboard
-    )
-
-def ask_vip_rate(update, context, cat_name):
-    categories = load_categories()
-    cat_id = None
-    for cid, info in categories.items():
-        if info['name'].lower() == cat_name.lower():
-            cat_id = cid
-            break
-    
-    if not cat_id:
-        update.message.reply_text("❌ Category not found!")
-        return
-    
-    context.user_data['vip_rate_cat'] = cat_id
-    update.message.reply_text(
-        f"Set rate for {cat_name}\n"
-        f"Default: {categories[cat_id]['price']} TK\n\n"
-        f"Send custom rate (e.g., 30, 7.5):"
-    )
-
-def save_vip_rate(update, context, rate_text):
-    try:
-        rate = float(rate_text) if '.' in rate_text else int(rate_text)
-        if rate <= 0:
-            update.message.reply_text("❌ Positive number required!")
-            return
-        
-        user_id_text = context.user_data.get('vip_rate_user')
-        cat_id = context.user_data.get('vip_rate_cat')
-        
-        if not user_id_text or not cat_id:
-            update.message.reply_text("❌ Session expired!")
-            return
-        
-        vip_users = load_vip_users()
-        if user_id_text not in vip_users:
-            update.message.reply_text("❌ VIP not found!")
-            return
-        
-        if 'custom_rates' not in vip_users[user_id_text]:
-            vip_users[user_id_text]['custom_rates'] = {}
-        
-        vip_users[user_id_text]['custom_rates'][cat_id] = rate
-        save_vip_users(vip_users)
-        
-        categories = load_categories()
-        category = categories.get(cat_id, {})
-        rate_str = f"{rate:.2f}".rstrip('0').rstrip('.') if isinstance(rate, float) else str(rate)
-        
-        update.message.reply_text(f"✅ Rate set!\n{category['emoji']} {category['name']}: {rate_str} TK")
-        show_vip_rates_menu(update, context, user_id_text)
-        
-    except ValueError:
-        update.message.reply_text("❌ Send valid number! (e.g., 30, 7.5)")
-
-def process_remove_vip(update, context, user_id_text):
-    if not user_id_text.isdigit():
-        update.message.reply_text("❌ Send numeric User ID!")
-        return
-    
-    vip_users = load_vip_users()
-    if user_id_text in vip_users:
-        del vip_users[user_id_text]
-        save_vip_users(vip_users)
-        update.message.reply_text(f"✅ VIP removed: {user_id_text}")
-    else:
-        update.message.reply_text(f"❌ {user_id_text} not in VIP list")
-    
-    show_admin_vip(update, update.effective_user.id)
-
-def search_user_start(update, context):
-    context.user_data['search_user'] = True
-    keyboard = get_admin_panel_keyboard()
-    update.message.reply_text(
-        "🔍 Search User Orders\n\n"
-        "Send username to search (e.g., @username or username):",
-        reply_markup=keyboard
-    )
-
-def search_user_orders(update, context, search_term):
-    search_term = search_term.strip()
-    if search_term.startswith('@'):
-        search_term = search_term[1:]
-    
-    orders = load_orders()
-    found_orders = []
-    
-    for order_id, order in orders.items():
-        username = order.get('username', '').replace('@', '').lower()
-        if search_term.lower() in username:
-            found_orders.append(order)
-    
-    keyboard = get_admin_panel_keyboard()
-    
-    if not found_orders:
-        update.message.reply_text(
-            f"❌ No orders found for username: @{search_term}\n\n"
-            f"Please check the username and try again.",
-            reply_markup=keyboard
-        )
-        context.user_data['search_user'] = False
-        return
-    
-    result_text = f"🔍 Search Results for: @{search_term}\n"
-    result_text += f"📊 Found {len(found_orders)} order(s)\n\n"
-    
-    for order in found_orders:
-        result_text += format_order_for_admin(order)
-        result_text += f"📊 Status: {get_status_text(order['status'])}\n\n"
-    
-    if len(result_text) > 4000:
-        first_part = result_text[:3800] + "\n\n... (More orders exist)"
-        update.message.reply_text(first_part, reply_markup=keyboard)
-        remaining = result_text[3800:]
-        chunks = [remaining[i:i+4000] for i in range(0, len(remaining), 4000)]
-        for chunk in chunks:
-            update.message.reply_text(chunk)
-    else:
-        update.message.reply_text(result_text, reply_markup=keyboard)
-    
-    context.user_data['search_user'] = False
-
-def broadcast_start(update, context):
-    context.user_data['broadcast'] = True
-    keyboard = get_admin_panel_keyboard()
-    update.message.reply_text(
-        "📢 Send broadcast message to ALL users:\n\n"
-        "Type your message below:",
-        reply_markup=keyboard
-    )
-
-def send_broadcast(update, context, message_text):
-    user_data = load_data()
-    sent = 0
-    failed = 0
-    
-    for user_id_str in user_data.keys():
+    # "Tk X.XX from" প্যাটার্ন
+    match = re.search(r'Tk\s*([\d,]+\.?\d*)\s+from', sms_text, re.IGNORECASE)
+    if match:
+        amount_str = match.group(1).replace(',', '').strip()
         try:
-            context.bot.send_message(chat_id=int(user_id_str), text=message_text)
-            sent += 1
-        except Exception as e:
-            failed += 1
-            logging.error(f"Failed to send broadcast to {user_id_str}: {e}")
+            amount = int(float(amount_str))
+            print(f"✅ পরিমাণ পাওয়া গেছে (Tk X from): {amount} টাকা")
+            return amount
+        except:
+            pass
     
-    keyboard = get_admin_panel_keyboard()
-    response_text = f"✅ Broadcast Sent!\n\n📊 Sent to: {sent} users\n❌ Failed: {failed} users"
-    update.message.reply_text(response_text, reply_markup=keyboard)
-    context.user_data['broadcast'] = False
-
-def show_edit_category(update, context, cat_name):
-    categories = load_categories()
-    cat_id = None
-    for cid, info in categories.items():
-        if info['name'].lower() == cat_name.lower():
-            cat_id = cid
-            break
-    
-    if not cat_id:
-        update.message.reply_text("❌ Category not found!")
-        return
-    
-    category = categories[cat_id]
-    price_str = f"{category['price']:.2f}".rstrip('0').rstrip('.') if isinstance(category['price'], float) else str(category['price'])
-    
-    keyboard = [
-        ["📝 Change Name", "💰 Change Price"],
-        ["🗑 Delete Category"],
-        ["🔙 Back to Categories"]
+    # অন্যান্য প্যাটার্ন
+    patterns = [
+        r'Tk\s*([\d,]+\.?\d*)',
+        r'([\d,]+)\s*টাকা',
+        r'([\d,]+)\s*TK',
+        r'([\d,]+)\s*BDT',
+        r'অ্যাকাউন্টে\s*([\d,]+)',
+        r'([\d,]+)\s*টাকা',
+        r'আমান\s*([\d,]+)',
+        r'([\d,]+)\s*/\s*-\s*',
+        r'([\d,]+)\.\d{2}\s*Tk',
     ]
-    reply_keyboard = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
     
-    context.user_data['editing_category'] = cat_id
-    
-    update.message.reply_text(
-        f"✏️ {category['emoji']} {category['name']}\n"
-        f"💰 Price: {price_str} TK\n\n"
-        f"Select an option:",
-        reply_markup=reply_keyboard
-    )
-
-def add_category_start(update, context):
-    context.user_data['add_cat'] = 'name'
-    keyboard = [
-        ["🔙 Back to Admin Panel"]
-    ]
-    reply_keyboard = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
-    update.message.reply_text(
-        "➕ Add Category\n\n"
-        "📝 Step 1/2: Send category name\n\n"
-        "Example: `Twitter` or `Hotmail`",
-        reply_markup=reply_keyboard
-    )
-
-def process_cat_name(update, context, name):
-    context.user_data['new_cat_name'] = name.strip()
-    context.user_data['add_cat'] = 'price'
-    keyboard = [
-        ["🔙 Back to Admin Panel"]
-    ]
-    reply_keyboard = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
-    update.message.reply_text(
-        f"📝 Name: {name.strip()}\n\n"
-        f"💰 Step 2/2: Send rate (TK)\n\n"
-        f"Example: `30` or `7.5`",
-        reply_markup=reply_keyboard
-    )
-
-def process_cat_price(update, context, price_text):
-    try:
-        price = float(price_text) if '.' in price_text else int(price_text)
-        if price <= 0:
-            update.message.reply_text("❌ Enter positive number!")
-            return
-        
-        name = context.user_data.get('new_cat_name')
-        if not name:
-            update.message.reply_text("❌ Session expired!")
-            return
-        
-        cat_id = name.lower().replace(" ", "_").replace("+", "_")
-        emoji = get_emoji_for_category(name)
-        categories = load_categories()
-        
-        if cat_id in categories:
-            update.message.reply_text(f"❌ '{name}' already exists!")
-            return
-        
-        categories[cat_id] = {"name": name, "price": price, "emoji": emoji}
-        save_categories(categories)
-        
-        price_str = f"{price:.2f}".rstrip('0').rstrip('.') if isinstance(price, float) else str(price)
-        update.message.reply_text(f"✅ Added!\n\n📁 {emoji} {name}\n💰 {price_str} TK")
-        
-        context.user_data['add_cat'] = None
-        context.user_data['new_cat_name'] = None
-        show_admin_categories(update, update.effective_user.id)
-        
-    except ValueError:
-        update.message.reply_text("❌ Send valid number! (e.g., 30, 7.5)")
-
-def change_category_name(update, context, cat_id):
-    context.user_data['ren_cat'] = cat_id
-    keyboard = [
-        ["🔙 Back to Categories"]
-    ]
-    reply_keyboard = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
-    update.message.reply_text("📝 Send new name:", reply_markup=reply_keyboard)
-
-def process_category_rename(update, context, new_name):
-    cat_id = context.user_data.get('ren_cat')
-    if not cat_id:
-        update.message.reply_text("❌ Session expired!")
-        return
-    
-    categories = load_categories()
-    if cat_id in categories:
-        new_emoji = get_emoji_for_category(new_name)
-        categories[cat_id]['name'] = new_name
-        categories[cat_id]['emoji'] = new_emoji
-        save_categories(categories)
-        update.message.reply_text(f"✅ Name changed to: {new_name}\n✨ Emoji: {new_emoji}")
-    
-    context.user_data['ren_cat'] = None
-    show_admin_categories(update, update.effective_user.id)
-
-def change_category_price(update, context, cat_id):
-    context.user_data['prc_cat'] = cat_id
-    keyboard = [
-        ["🔙 Back to Categories"]
-    ]
-    reply_keyboard = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
-    update.message.reply_text("💰 Send new price (e.g., 30, 7.5):", reply_markup=reply_keyboard)
-
-def process_category_price(update, context, price_text):
-    cat_id = context.user_data.get('prc_cat')
-    if not cat_id:
-        update.message.reply_text("❌ Session expired!")
-        return
-    
-    try:
-        price = float(price_text) if '.' in price_text else int(price_text)
-        if price <= 0:
-            update.message.reply_text("Enter positive number!")
-            return
-        
-        categories = load_categories()
-        if cat_id in categories:
-            categories[cat_id]['price'] = price
-            save_categories(categories)
-            price_str = f"{price:.2f}".rstrip('0').rstrip('.') if isinstance(price, float) else str(price)
-            update.message.reply_text(f"✅ Price: {price_str} TK")
-        
-        context.user_data['prc_cat'] = None
-        show_admin_categories(update, update.effective_user.id)
-        
-    except ValueError:
-        update.message.reply_text("Send valid number! (e.g., 30, 7.5)")
-
-def delete_category(update, context, cat_id):
-    categories = load_categories()
-    if cat_id in categories:
-        del categories[cat_id]
-        save_categories(categories)
-        update.message.reply_text("✅ Deleted!")
-    
-    show_admin_categories(update, update.effective_user.id)
-
-def change_payment_start(update, context):
-    keyboard = [
-        ["bKash", "Nagad"],
-        ["Rocket", "Binance"],
-        ["🔙 Back to Settings"]
-    ]
-    reply_keyboard = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
-    update.message.reply_text("Select new payment method:", reply_markup=reply_keyboard)
-
-def change_payment_number(update, context, method):
-    context.user_data['change_payment_method'] = method
-    keyboard = [
-        ["🔙 Back to Settings"]
-    ]
-    reply_keyboard = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
-    update.message.reply_text(f"Enter your {method} number:", reply_markup=reply_keyboard)
-
-def save_new_payment(update, context):
-    user_id = update.effective_user.id
-    number = update.message.text.strip()
-    method = context.user_data.get('change_payment_method')
-    
-    if not method:
-        update.message.reply_text("❌ Session expired!")
-        return
-    
-    user_data = load_data()
-    user_data[str(user_id)]["payment_method"] = method
-    user_data[str(user_id)]["payment_number"] = number
-    save_data(user_data)
-    
-    context.user_data['change_payment_method'] = None
-    update.message.reply_text(f"✅ Payment updated!\n\n💳 {method}\n📞 {number}")
-    show_main_menu(update, user_id)
-
-# ================ BUTTON CALLBACK ================
-
-def button_callback(update, context):
-    query = update.callback_query
-    query.answer()
-    user_id = update.effective_user.id
-    data = query.data
-    
-    if user_id not in ADMIN_IDS:
-        if not is_member(context.bot, user_id):
-            query.edit_message_text("Please join the channel!")
-            return
-    
-    if data.startswith("note_") and user_id in ADMIN_IDS:
-        order_id = data.replace("note_", "")
-        edit_admin_note(update, context, order_id)
-        return
-    
-    if data.startswith("back_to_order_"):
-        order_id = data.replace("back_to_order_", "")
-        orders = load_orders()
-        if order_id in orders:
-            order = orders[order_id]
-            order_text = format_order_for_admin(order)
-            
-            status = order['status']
-            if status == 'received':
-                receive_btn = InlineKeyboardButton("✅ Received ✅", callback_data="done")
-            else:
-                receive_btn = InlineKeyboardButton("✅ Receive", callback_data=f"receive_{order_id}")
-            
-            if status == 'cancelled':
-                cancel_btn = InlineKeyboardButton("❌ Cancelled ❌", callback_data="done")
-            else:
-                cancel_btn = InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{order_id}")
-            
-            if status == 'completed':
-                complete_btn = InlineKeyboardButton("✅ Payment Confirmed ✅", callback_data="done")
-            else:
-                complete_btn = InlineKeyboardButton("💳 Payment Complete", callback_data=f"complete_{order_id}")
-            
-            keyboard_inline = [
-                [receive_btn, cancel_btn],
-                [complete_btn],
-                [InlineKeyboardButton("✏️ Edit Note", callback_data=f"note_{order_id}")]
-            ]
-            
+    for pattern in patterns:
+        match = re.search(pattern, sms_text, re.IGNORECASE)
+        if match:
+            amount_str = match.group(1).replace(',', '').strip()
             try:
-                query.message.delete()
-                query.message.reply_text(
-                    f"📦 Order #{order_id}\n\n{order_text}\n\n📊 Status: {get_status_text(order['status'])}",
-                    reply_markup=InlineKeyboardMarkup(keyboard_inline)
-                )
+                if '.' in amount_str:
+                    amt = float(amount_str)
+                else:
+                    amt = float(amount_str)
+                
+                if 1 <= amt <= 100000:
+                    amount = int(round(amt))
+                    print(f"✅ পরিমাণ পাওয়া গেছে: {amount} টাকা")
+                    return amount
             except:
-                query.message.reply_text(
-                    f"📦 Order #{order_id}\n\n{order_text}\n\n📊 Status: {get_status_text(order['status'])}",
-                    reply_markup=InlineKeyboardMarkup(keyboard_inline)
-                )
-        context.user_data['editing_note_order'] = None
-        return
+                continue
     
-    if data.startswith("receive_") and user_id in ADMIN_IDS:
-        order_id = data.replace("receive_", "")
-        handle_receive_order(update, context, order_id)
-        return
-    elif data.startswith("cancel_") and user_id in ADMIN_IDS:
-        order_id = data.replace("cancel_", "")
-        handle_cancel_order(update, context, order_id)
-        return
-    elif data.startswith("complete_") and user_id in ADMIN_IDS:
-        order_id = data.replace("complete_", "")
-        handle_complete_order(update, context, order_id)
-        return
-    
-    if data == "done":
-        return
-    
-    if data == "check_join":
-        if is_member(context.bot, user_id):
-            keyboard = [[InlineKeyboardButton("bKash", callback_data="method_bkash")],
-                        [InlineKeyboardButton("Nagad", callback_data="method_nagad")],
-                        [InlineKeyboardButton("Rocket", callback_data="method_rocket")],
-                        [InlineKeyboardButton("Binance", callback_data="method_binance")]]
-            query.edit_message_text("Select payment method:", reply_markup=InlineKeyboardMarkup(keyboard))
-        else:
-            query.edit_message_text("Not a member!")
-    elif data.startswith("method_"):
-        method = data.split("_")[1]
-        context.user_data['temp_method'] = method
-        query.message.reply_text(f"Enter your {method} number:")
-        context.user_data['waiting_for_payment_number'] = True
+    print(f"⚠️ পরিমাণ বের করতে ব্যর্থ")
+    return None
 
-# ================ ORDER MANAGEMENT FUNCTIONS ================
-
-def edit_admin_note(update, context, order_id):
-    orders = load_orders()
+def process_bkash_sms(sms_text: str):
+    """
+    bKash SMS সম্পূর্ণ প্রসেস করে
+    """
+    print(f"\n{'='*50}")
+    print(f"📱 নতুন SMS প্রসেস করা হচ্ছে:")
+    print(f"{'='*50}")
+    print(f"SMS: {sms_text}")
+    print(f"{'='*50}")
     
-    if order_id not in orders:
-        update.callback_query.answer("❌ Order not found!", show_alert=True)
+    trxid = extract_trxid_from_bkash_sms(sms_text)
+    amount = extract_amount_from_bkash_sms(sms_text)
+    
+    print(f"{'='*50}")
+    print(f"📊 ফলাফল:")
+    print(f"  TRXID: {trxid}")
+    print(f"  পরিমাণ: {amount} টাকা")
+    print(f"{'='*50}\n")
+    
+    return trxid, amount
+
+async def auto_deposit_from_sms(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    SMS থেকে অটো ডিপোজিট প্রসেস করে
+    """
+    global total_deposits, transaction_log, user_deposits, balances, pending_deposits, processed_trxids
+    
+    # শুধুমাত্র অ্যাডমিনের চ্যাট থেকে আসা SMS প্রসেস করুন
+    if update.effective_user.id != ADMIN_ID:
+        print(f"⚠️ অ্যাডমিন নয়: {update.effective_user.id}")
         return
     
-    context.user_data['editing_note_order'] = order_id
+    message_text = update.message.text
+    print(f"\n📱 নতুন SMS প্রাপ্ত:")
+    print(f"SMS: {message_text}")
     
-    current_note = orders[order_id].get('admin_note', '')
+    # SMS লগ করুন
+    log_sms(message_text)
     
-    if current_note:
-        note_display = f"📝 Current Note: {current_note}"
-    else:
-        note_display = "📝 No note added yet"
-    
-    keyboard_inline = [
-        [InlineKeyboardButton("🔙 Back to Order", callback_data=f"back_to_order_{order_id}")]
-    ]
-    
-    try:
-        update.callback_query.message.reply_text(
-            f"✏️ Edit Note for Order #{order_id}\n\n"
-            f"{note_display}\n\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"📝 Type your note below and press Send:\n"
-            f"(Note will only be visible to Admins)",
-            reply_markup=InlineKeyboardMarkup(keyboard_inline)
-        )
-        update.callback_query.answer()
-    except Exception as e:
-        logging.error(f"Error in edit_admin_note: {e}")
-        update.callback_query.message.reply_text(
-            f"✏️ Edit Note for Order #{order_id}\n\n"
-            f"Type your note and press Send:",
-            reply_markup=InlineKeyboardMarkup(keyboard_inline)
-        )
-
-def save_admin_note(update, context, order_id, note_text):
-    orders = load_orders()
-    
-    if order_id not in orders:
-        update.message.reply_text("❌ Order not found!")
-        return
-    
-    orders[order_id]['admin_note'] = note_text.strip()
-    save_orders(orders)
-    
-    order = orders[order_id]
-    
-    status = order['status']
-    if status == 'received':
-        receive_btn = InlineKeyboardButton("✅ Received ✅", callback_data="done")
-    else:
-        receive_btn = InlineKeyboardButton("✅ Receive", callback_data=f"receive_{order_id}")
-    
-    if status == 'cancelled':
-        cancel_btn = InlineKeyboardButton("❌ Cancelled ❌", callback_data="done")
-    else:
-        cancel_btn = InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{order_id}")
-    
-    if status == 'completed':
-        complete_btn = InlineKeyboardButton("✅ Payment Confirmed ✅", callback_data="done")
-    else:
-        complete_btn = InlineKeyboardButton("💳 Payment Complete", callback_data=f"complete_{order_id}")
-    
-    keyboard_inline = [
-        [receive_btn, cancel_btn],
-        [complete_btn],
-        [InlineKeyboardButton("✏️ Edit Note", callback_data=f"note_{order_id}")]
-    ]
-    
-    order_text = format_order_for_admin(order)
-    
-    update.message.reply_text(
-        f"✅ Note saved successfully for Order #{order_id}!\n\n"
-        f"📦 Order #{order_id}\n\n"
-        f"{order_text}\n\n"
-        f"📊 Status: {get_status_text(order['status'])}",
-        reply_markup=InlineKeyboardMarkup(keyboard_inline)
+    # প্রথমে রেসপন্স দিন যে SMS পাওয়া গেছে
+    await update.message.reply_text(
+        f"📱 SMS প্রাপ্ত হয়েছে। প্রসেস করা হচ্ছে...\n"
+        f"🔍 TRXID এবং পরিমাণ বের করা হচ্ছে..."
     )
     
-    context.user_data['editing_note_order'] = None
-
-def update_order_status(update, context, order_id, new_status, button_text, user_message):
-    user_id = update.effective_user.id
-    if user_id not in ADMIN_IDS:
-        return False
+    # bKash SMS প্রসেস করুন
+    trxid, amount = process_bkash_sms(message_text)
     
-    orders = load_orders()
-    if order_id not in orders:
-        if update.callback_query:
-            update.callback_query.answer("❌ Order not found!", show_alert=True)
-        return False
+    if not trxid:
+        await update.message.reply_text(
+            f"⚠️ SMS থেকে TRXID বের করতে ব্যর্থ হয়েছে।\n"
+            f"📱 SMS: {message_text[:100]}...\n\n"
+            f"💡 TRXID ফরম্যাট: TrxID XXXXXXXX"
+        )
+        return
     
-    orders[order_id]['status'] = new_status
-    save_orders(orders)
-    order = orders[order_id]
+    if not amount:
+        await update.message.reply_text(
+            f"⚠️ SMS থেকে পরিমাণ বের করতে ব্যর্থ হয়েছে।\n"
+            f"🔑 TRXID: {trxid}\n"
+            f"📱 SMS: {message_text[:100]}..."
+        )
+        return
     
-    status = order['status']
+    # ইতিমধ্যে প্রসেস করা TRXID চেক করুন
+    if trxid in processed_trxids:
+        await update.message.reply_text(
+            f"⏭️ এই TRXID ইতিমধ্যে প্রসেস করা হয়েছে:\n"
+            f"🔑 {trxid}\n"
+            f"💰 {amount} টাকা"
+        )
+        return
     
-    if status == 'received':
-        receive_btn = InlineKeyboardButton("✅ Received ✅", callback_data="done")
-    else:
-        receive_btn = InlineKeyboardButton("✅ Receive", callback_data=f"receive_{order_id}")
-    
-    if status == 'cancelled':
-        cancel_btn = InlineKeyboardButton("❌ Cancelled ❌", callback_data="done")
-    else:
-        cancel_btn = InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_{order_id}")
-    
-    if status == 'completed':
-        complete_btn = InlineKeyboardButton("✅ Payment Confirmed ✅", callback_data="done")
-    else:
-        complete_btn = InlineKeyboardButton("💳 Payment Complete", callback_data=f"complete_{order_id}")
-    
-    keyboard_inline = [
-        [receive_btn, cancel_btn],
-        [complete_btn],
-        [InlineKeyboardButton("✏️ Edit Note", callback_data=f"note_{order_id}")]
-    ]
-    
-    try:
-        order_text = format_order_for_admin(order)
-        current_time = datetime.now().strftime("%d-%m-%Y %I:%M %p")
+    # পেন্ডিং ডিপোজিটের সাথে মিলিয়ে দেখুন
+    if trxid in pending_deposits:
+        deposit_data = pending_deposits[trxid]
+        user_id = deposit_data['user_id']
+        expected_amount = deposit_data['amount']
+        username = deposit_data.get('username', 'N/A')
+        method = deposit_data.get('method', 'Unknown')
         
-        if update.callback_query:
+        print(f"\n🔍 পেন্ডিং ডিপোজিট পাওয়া গেছে:")
+        print(f"  ইউজার আইডি: {user_id}")
+        print(f"  ইউজারনেম: {username}")
+        print(f"  প্রত্যাশিত পরিমাণ: {expected_amount}")
+        print(f"  SMS পরিমাণ: {amount}")
+        
+        # পরিমাণ মিলিয়ে দেখুন
+        if amount == expected_amount:
+            # ব্যালেন্স অ্যাড করুন
+            balances[user_id] = balances.get(user_id, 0) + amount
+            total_deposits += amount
+            transaction_log.append(('deposit', user_id, amount, time.time()))
+            user_deposits[user_id] = user_deposits.get(user_id, 0) + amount
+            
+            # পেন্ডিং লিস্ট থেকে রিমুভ করুন
+            del pending_deposits[trxid]
+            processed_trxids.add(trxid)
+            save_user_data()
+            
+            # ডিপোজিট লগ
+            log_deposit(user_id, amount, trxid, "AUTO_SUCCESS", method)
+            
+            # ইউজারকে নোটিফিকেশন পাঠান
             try:
-                update.callback_query.edit_message_caption(
-                    caption=f"📦 Order #{order_id}\n🕐 Updated: {current_time}\n\n{order_text}\n\n📊 Status: {get_status_text(status)}",
-                    reply_markup=InlineKeyboardMarkup(keyboard_inline)
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=f"✅ আপনার {amount} টাকা ডিপোজিট স্বয়ংক্রিয়ভাবে সফল হয়েছে!\n"
+                         f"🔑 TRXID: {trxid}\n"
+                         f"💰 নতুন ব্যালেন্স: {balances[user_id]} টাকা।"
                 )
-            except:
-                update.callback_query.message.reply_text(
-                    f"📦 Order #{order_id}\n🕐 Updated: {current_time}\n\n{order_text}\n\n📊 Status: {get_status_text(status)}",
-                    reply_markup=InlineKeyboardMarkup(keyboard_inline)
-                )
-            update.callback_query.answer(f"{button_text}", show_alert=True)
-        else:
-            update.message.reply_text(
-                f"📦 Order #{order_id}\n🕐 Updated: {current_time}\n\n{order_text}\n\n📊 Status: {get_status_text(status)}",
-                reply_markup=InlineKeyboardMarkup(keyboard_inline)
+                print(f"✅ ইউজার {user_id} কে নোটিফিকেশন পাঠানো হয়েছে")
+            except Exception as e:
+                logger.error(f"Failed to notify user {user_id}: {e}")
+            
+            # অ্যাডমিনকে জানান
+            await update.message.reply_text(
+                f"✅ অটো ডিপোজিট সফল!\n\n"
+                f"👤 ইউজার: @{username} (ID: {user_id})\n"
+                f"💰 পরিমাণ: {amount} টাকা\n"
+                f"🔑 TRXID: {trxid}\n"
+                f"💳 মেথড: {method}\n"
+                f"📱 SMS: {message_text[:150]}..."
             )
-    except Exception as e:
-        logging.error(f"Error updating admin message: {e}")
-        if update.callback_query:
-            update.callback_query.message.reply_text(f"✅ Order #{order_id} - {button_text}")
-        else:
-            update.message.reply_text(f"✅ Order #{order_id} - {button_text}")
-    
-    try:
-        user_id = order['user_id']
-        user_text = f"━━━━━━━━━━━━━━━━━━━━\n"
-        user_text += f"📋 ORDER UPDATE\n"
-        user_text += f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        user_text += f"🆔 Order: #{order['order_id']}\n"
-        user_text += f"⏰ Time: {order.get('order_time', 'N/A')}\n"
-        user_text += f"⭐️ Type: {order.get('user_type', 'Normal')}\n"
-        user_text += f"📛 Name: {order.get('user_name', 'N/A')}\n"
-        user_text += f"🔖 Username: {order.get('username', 'N/A')}\n"
-        user_text += f"📁 Category: {order['category']}\n"
-        user_text += f"🔢 Quantity: {order['quantity']}\n"
-        user_text += f"💰 Rate: {order['rate']} TK\n"
-        user_text += f"💳 Payment: {order.get('payment_method', 'N/A')}\n"
-        user_text += f"📞 Number: {order.get('payment_number', 'N/A')}\n"
-        user_text += f"📊 Status: {get_status_text(status)}\n"
-        user_text += f"🕐 Updated: {current_time}\n\n"
-        user_text += f"{user_message}\n"
-        user_text += f"━━━━━━━━━━━━━━━━━━━━\n"
-        user_text += f"Thank you for using our service! 🙏"
-        
-        context.bot.send_message(
-            chat_id=user_id,
-            text=user_text
-        )
-    except Exception as e:
-        logging.error(f"Error sending user notification: {e}")
-    
-    return True
-
-def handle_receive_order(update, context, order_id):
-    update_order_status(
-        update, context, order_id,
-        'received',
-        "✅ Received ✅",
-        "Your order has been received by admin. We will process it shortly."
-    )
-
-def handle_cancel_order(update, context, order_id):
-    update_order_status(
-        update, context, order_id,
-        'cancelled',
-        "❌ Cancelled ❌",
-        "Your order has been cancelled by admin. Please contact support if you have any questions."
-    )
-
-def handle_complete_order(update, context, order_id):
-    update_order_status(
-        update, context, order_id,
-        'completed',
-        "✅ Payment Confirmed ✅",
-        "Payment confirmed for your order! Thank you for choosing our service."
-    )
-
-# ================ MESSAGE HANDLER ================
-
-def message_handler(update, context):
-    user_id = update.effective_user.id
-    text = update.message.text.strip() if update.message.text else None
-    
-    if update.message.document:
-        if context.user_data.get('awaiting_file') or context.user_data.get('awaiting_report'):
-            handle_file_upload(update, context)
-        else:
-            if user_id in ADMIN_IDS:
-                update.message.reply_text("❌ Please select an option from Admin Panel first.")
-            else:
-                update.message.reply_text("❌ Please select a category first from the menu.")
-        return
-    
-    if not text:
-        return
-    
-    if context.user_data.get('waiting_for_payment_number'):
-        save_payment_number(update, context)
-        return
-    
-    if context.user_data.get('change_payment_method'):
-        save_new_payment(update, context)
-        return
-    
-    if context.user_data.get('editing_note_order') and user_id in ADMIN_IDS:
-        order_id = context.user_data['editing_note_order']
-        save_admin_note(update, context, order_id, text)
-        return
-    
-    if context.user_data.get('search_user') and user_id in ADMIN_IDS:
-        search_user_orders(update, context, text)
-        return
-    
-    if context.user_data.get('add_vip') and user_id in ADMIN_IDS:
-        process_add_vip(update, context, text)
-        context.user_data['add_vip'] = False
-        return
-    
-    if context.user_data.get('vip_rate_cat') and user_id in ADMIN_IDS:
-        save_vip_rate(update, context, text)
-        return
-    
-    if context.user_data.get('add_cat') == 'name' and user_id in ADMIN_IDS:
-        process_cat_name(update, context, text)
-        return
-    
-    if context.user_data.get('add_cat') == 'price' and user_id in ADMIN_IDS:
-        process_cat_price(update, context, text)
-        return
-    
-    if context.user_data.get('ren_cat') and user_id in ADMIN_IDS:
-        process_category_rename(update, context, text)
-        return
-    
-    if context.user_data.get('prc_cat') and user_id in ADMIN_IDS:
-        process_category_price(update, context, text)
-        return
-    
-    if context.user_data.get('broadcast') and user_id in ADMIN_IDS:
-        send_broadcast(update, context, text)
-        return
-    
-    # Main menu commands
-    if text == "📝 File Submit":
-        show_categories_menu(update, user_id)
-        return
-    
-    elif text == "🆘 Admin Support":
-        show_support_menu(update, user_id)
-        return
-    
-    elif text == "⚙️ Settings":
-        show_setting_menu(update, user_id)
-        return
-    
-    elif text == "👑 Admin Panel" and user_id in ADMIN_IDS:
-        show_admin_panel(update, user_id)
-        return
-    
-    elif text == "🔙 Back to Main" or text == "🔙 Back":
-        show_main_menu(update, user_id)
-        return
-    
-    elif text == "🔙 Back to Admin Panel" and user_id in ADMIN_IDS:
-        show_admin_panel(update, user_id)
-        return
-    
-    elif text == "🔙 Back to Settings":
-        show_setting_menu(update, user_id)
-        return
-    
-    elif text == "🔙 Back to Categories" and user_id in ADMIN_IDS:
-        show_admin_categories(update, user_id)
-        return
-    
-    elif text == "🔙 Back to VIP Management" and user_id in ADMIN_IDS:
-        show_admin_vip(update, user_id)
-        return
-    
-    # Admin panel options
-    if user_id in ADMIN_IDS:
-        if text == "📁 Manage Categories":
-            show_admin_categories(update, user_id)
-            return
-        
-        elif text == "👑 VIP Users":
-            show_admin_vip(update, user_id)
-            return
-        
-        elif text == "🔍 Search User":
-            search_user_start(update, context)
-            return
-        
-        elif text == "📢 Broadcast":
-            broadcast_start(update, context)
-            return
-        
-        elif text == "📊 Report System":
-            show_report_system(update, user_id)
-            return
-        
-        elif text == "📤 Upload Report":
-            start_report_upload(update, context)
-            return
-        
-        elif text == "📋 View Reports":
-            view_reports(update, user_id)
-            return
-        
-        elif text == "➕ Add VIP":
-            add_vip_start(update, context)
-            return
-        
-        elif text == "📋 VIP List":
-            show_vip_list(update, user_id)
-            return
-        
-        elif text == "✏️ Edit Rates":
-            edit_vip_rates_list(update, context)
-            return
-        
-        elif text == "🗑 Remove VIP":
-            remove_vip_start(update, context)
-            return
-        
-        elif text == "➕ Add New Category":
-            add_category_start(update, context)
-            return
-        
-        elif text.startswith("✏️") and "📁" in text:
-            parts = text.split("📁")
-            if len(parts) > 1:
-                cat_name = parts[1].split(" -")[0].strip()
-                show_edit_category(update, context, cat_name)
-                return
-        
-        elif text == "📝 Change Name" and context.user_data.get('editing_category'):
-            cat_id = context.user_data['editing_category']
-            change_category_name(update, context, cat_id)
-            return
-        
-        elif text == "💰 Change Price" and context.user_data.get('editing_category'):
-            cat_id = context.user_data['editing_category']
-            change_category_price(update, context, cat_id)
-            return
-        
-        elif text == "🗑 Delete Category" and context.user_data.get('editing_category'):
-            cat_id = context.user_data['editing_category']
-            delete_category(update, context, cat_id)
-            context.user_data['editing_category'] = None
-            return
-        
-        elif context.user_data.get('vip_rate_user'):
-            categories = load_categories()
-            for cat_id, info in categories.items():
-                if info['name'] in text:
-                    ask_vip_rate(update, context, info['name'])
-                    return
-        
-        elif text.startswith("/remove_vip_") and user_id in ADMIN_IDS:
-            uid = text.replace("/remove_vip_", "")
-            process_remove_vip(update, context, uid)
-            return
-        
-        elif text.startswith("/edit_vip_") and user_id in ADMIN_IDS:
-            uid = text.replace("/edit_vip_", "")
-            show_vip_rates_menu(update, context, uid)
-            return
-    
-    if text == "💳 Change Payment":
-        change_payment_start(update, context)
-        return
-    
-    elif text in ["bKash", "Nagad", "Rocket", "Binance"] and context.user_data.get('change_payment_method') is None:
-        change_payment_number(update, context, text)
-        return
-    
-    # Handle category selection
-    categories = load_categories()
-    for cat_id, cat_info in categories.items():
-        price = get_user_price(cat_id, user_id) if is_vip_user(user_id) else cat_info['price']
-        price_str = f"{price:.2f}".rstrip('0').rstrip('.') if isinstance(price, float) else str(price)
-        button_text = f"{cat_info['emoji']} {cat_info['name']} - {price_str} TK"
-        if is_vip_user(user_id):
-            button_text += " ⭐"
-        
-        if text == button_text:
-            context.user_data['selected_category'] = cat_id
-            user_type = "VIP ⭐" if is_vip_user(user_id) else "Normal"
             
-            keyboard = get_main_menu_keyboard(user_id)
-            update.message.reply_text(
-                f"📁 Selected: {cat_info['emoji']} {cat_info['name']}\n"
-                f"👤 Type: {user_type}\n"
-                f"💰 Price: {price_str} TK per piece\n\n"
-                f"📎 Please upload your Excel file (.xlsx)\n\n"
-                f"⚠️ Only .xlsx files are accepted.\n"
-                f"🔄 Duplicates in Column A will be automatically removed.\n"
-                f"🔍 Existing data will be checked and removed.",
+        else:
+            # পরিমাণ মিলছে না
+            await update.message.reply_text(
+                f"⚠️ TRXID মিলেছে কিন্তু পরিমাণ মিলছে না!\n\n"
+                f"🔑 TRXID: {trxid}\n"
+                f"💰 ইউজার দিয়েছে: {expected_amount} টাকা\n"
+                f"💰 SMS এ আছে: {amount} টাকা\n"
+                f"👤 ইউজার: @{username} (ID: {user_id})\n"
+                f"💳 মেথড: {method}\n\n"
+                f"⚠️ ম্যানুয়ালি চেক করুন।"
+            )
+            
+            # ডিপোজিট লগ
+            log_deposit(user_id, amount, trxid, "AUTO_FAIL_AMOUNT_MISMATCH", method)
+    else:
+        # TRXID পেন্ডিং লিস্টে নেই
+        await update.message.reply_text(
+            f"ℹ️ এই TRXID এর জন্য কোনো পেন্ডিং ডিপোজিট নেই:\n\n"
+            f"🔑 TRXID: {trxid}\n"
+            f"💰 পরিমাণ: {amount} টাকা\n"
+            f"📱 SMS: {message_text[:150]}...\n\n"
+            f"কোনো ইউজার এই TRXID ব্যবহার করে ডিপোজিট করেনি অথবা TRXID ভুল।"
+        )
+        
+        # এই TRXID প্রসেসড হিসেবে চিহ্নিত করুন (পুনরায় প্রসেস না করার জন্য)
+        processed_trxids.add(trxid)
+        save_user_data()
+        
+        # ডিপোজিট লগ
+        log_deposit(0, amount, trxid, "AUTO_NO_PENDING")
+
+# ================ BACK TO MAIN MENU ================
+async def back_to_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await start(update, context)
+
+# ================ CHECK SUBSCRIPTION ================
+async def check_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    try:
+        chat_member = await context.bot.get_chat_member(chat_id=f"@{CHANNEL_USERNAME}", user_id=user_id)
+        if chat_member.status in [ChatMember.MEMBER, ChatMember.ADMINISTRATOR, ChatMember.OWNER]:
+            return True
+        else:
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("Join Channel", url=f"https://t.me/{CHANNEL_USERNAME}")]
+            ])
+            await update.message.reply_text(
+                "❌ আপনি এখনো আমাদের চ্যানেলে জয়েন করেননি।\n"
+                "বট ব্যবহার করার জন্য অনুগ্রহ করে নিচের বাটনে ক্লিক করে চ্যানেলে জয়েন করুন।",
                 reply_markup=keyboard
             )
-            context.user_data['awaiting_file'] = True
-            return
+            return False
+    except Exception as e:
+        logger.error(f"Error checking subscription: {e}")
+        await update.message.reply_text("চ্যানেল সদস্যতা পরীক্ষা করতে সমস্যা হচ্ছে। অনুগ্রহ করে পরে আবার চেষ্টা করুন।")
+        return False
+
+# ================ START ================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_subscription(update, context):
+        return ConversationHandler.END
     
-    # Default
-    show_main_menu(update, user_id)
+    user_id = update.effective_user.id
+    username = update.effective_user.username
+    first_name = update.effective_user.first_name
+    
+    if user_id not in user_info:
+        user_info[user_id] = {
+            "username": username,
+            "first_name": first_name,
+            "last_name": update.effective_user.last_name,
+            "id": user_id
+        }
+        save_user_data()
+
+    current_balance = balances.get(user_id, 0)
+
+    keyboard = [
+        [KeyboardButton("🛒 Buy"), KeyboardButton("💰 Balance")],
+        [KeyboardButton("💸 Deposit"), KeyboardButton("📞 Help")],
+    ]
+    if update.effective_user.id == ADMIN_ID:
+        keyboard.append([KeyboardButton("⚙️ Admin Panel")])
+    
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
+    await update.message.reply_text(f"👋 স্বাগতম! আপনার বর্তমান ব্যালেন্স: {current_balance} টাকা।", reply_markup=reply_markup)
+    return MAIN_MENU
+
+async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_subscription(update, context):
+        return ConversationHandler.END
+
+    text = update.message.text
+    
+    if text == "🛒 Buy":
+        if not categories:
+            await update.message.reply_text("⚠️ এখন কোনো ক্যাটাগরি নেই।")
+            return MAIN_MENU
+        
+        keyboard = []
+        for cat in categories.keys():
+            keyboard.append([KeyboardButton(cat)])
+        
+        keyboard.append([KeyboardButton("🔙 Back to Main Menu")])
+        await update.message.reply_text("🛒 ক্যাটাগরি বেছে নিন:", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+        return BUY_MENU
+
+    if text == "💰 Balance":
+        user_id = update.effective_user.id
+        current_balance = balances.get(user_id, 0)
+        await update.message.reply_text(f"আপনার বর্তমান ব্যালেন্স: {current_balance} টাকা।")
+        return MAIN_MENU
+
+    if text == "💸 Deposit":
+        return await deposit_select_method(update, context)
+
+    if text == "📞 Help":
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📞 Contact Admin", url=f"tg://user?id={ADMIN_ID}")]
+        ])
+        await update.message.reply_text(
+            "📞 অ্যাডমিনের সাথে যোগাযোগ করতে নিচের বাটনে ক্লিক করুন।",
+            reply_markup=keyboard
+        )
+        return MAIN_MENU
+
+    if text == "⚙️ Admin Panel":
+        if update.effective_user.id == ADMIN_ID:
+            return await show_dashboard(update, context)
+        else:
+            await update.message.reply_text("❌ অননুমোদিত।")
+            return MAIN_MENU
+            
+    if text == "🔙 Back to Main Menu":
+        return await start(update, context)
+    
+    return MAIN_MENU
+
+# ================ DEPOSIT SYSTEM ================
+async def deposit_select_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not payment_methods:
+        await update.message.reply_text(
+            "❌ এখন কোনো পেমেন্ট মেথড নেই। অ্যাডমিনের সাথে যোগাযোগ করুন।",
+            reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Back to Main Menu")]], resize_keyboard=True)
+        )
+        return MAIN_MENU
+    
+    keyboard = []
+    for method_name, method_data in payment_methods.items():
+        if method_data.get("active", True):
+            keyboard.append([KeyboardButton(f"💳 {method_name}")])
+    
+    keyboard.append([KeyboardButton("🔙 Back to Main Menu")])
+    
+    await update.message.reply_text(
+        "💸 অনুগ্রহ করে আপনার ডিপোজিট মেথড নির্বাচন করুন:",
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    )
+    return DEPOSIT_SELECT_METHOD
+
+async def deposit_enter_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    
+    if text == "🔙 Back to Main Menu":
+        return await start(update, context)
+    
+    # Extract method name from button text
+    method_name = text.replace("💳 ", "").strip()
+    
+    if method_name not in payment_methods:
+        await update.message.reply_text(
+            "❌ অবৈধ পেমেন্ট মেথড। অনুগ্রহ করে আবার নির্বাচন করুন।",
+            reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Back to Main Menu")]], resize_keyboard=True)
+        )
+        return DEPOSIT_SELECT_METHOD
+    
+    context.user_data['deposit_method'] = method_name
+    
+    # Show payment details
+    method_details = payment_methods[method_name].get("details", "কোনো বিস্তারিত তথ্য নেই।")
+    
+    await update.message.reply_text(
+        f"💳 পেমেন্ট মেথড: {method_name}\n"
+        f"📋 বিস্তারিত:\n{method_details}\n\n"
+        f"✍️ আপনি কত টাকা ডিপোজিট করতে চান তা লিখুন:",
+        reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Back to Main Menu")]], resize_keyboard=True)
+    )
+    return DEPOSIT_ENTER_AMOUNT
+
+async def deposit_receive_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    amount_str = update.message.text.strip()
+    
+    if amount_str == "🔙 Back to Main Menu":
+        return await start(update, context)
+    
+    if not amount_str.isdigit() or int(amount_str) <= 0:
+        await update.message.reply_text(
+            "❌ অনুগ্রহ করে একটি বৈধ সংখ্যা লিখুন।",
+            reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Back to Main Menu")]], resize_keyboard=True)
+        )
+        return DEPOSIT_ENTER_AMOUNT
+    
+    amount = int(amount_str)
+    context.user_data['deposit_amount'] = amount
+    
+    await update.message.reply_text(
+        f"✅ আপনি {amount} টাকা ডিপোজিট করতে চান।\n\n"
+        f"✍️ এখন আপনার ট্রানজেকশন আইডি (TRXID) লিখুন:\n"
+        f"(যে আইডি পেমেন্টের সময় পেয়েছেন)",
+        reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Back to Main Menu")]], resize_keyboard=True)
+    )
+    return DEPOSIT_ENTER_TRXID
+
+async def deposit_receive_trxid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    trxid = update.message.text.strip().upper()
+    
+    if trxid == "🔙 Back to Main Menu":
+        return await start(update, context)
+    
+    if not trxid or len(trxid) < 6:
+        await update.message.reply_text(
+            "❌ অনুগ্রহ করে একটি বৈধ ট্রানজেকশন আইডি লিখুন (অন্তত ৬ অক্ষর)।",
+            reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Back to Main Menu")]], resize_keyboard=True)
+        )
+        return DEPOSIT_ENTER_TRXID
+    
+    method_name = context.user_data.get('deposit_method', 'Unknown')
+    amount = context.user_data.get('deposit_amount', 0)
+    user = update.effective_user
+    username = user.username if user.username else 'N/A'
+    
+    # TRXID টি পেন্ডিং লিস্টে সেভ করুন (অটো ডিপোজিটের জন্য)
+    global pending_deposits
+    pending_deposits[trxid] = {
+        "user_id": user.id,
+        "amount": amount,
+        "timestamp": time.time(),
+        "method": method_name,
+        "username": username
+    }
+    save_user_data()
+    
+    # ডিপোজিট লগ
+    log_deposit(user.id, amount, trxid, "PENDING", method_name)
+    
+    # অ্যাডমিনকে নোটিফিকেশন পাঠান (ব্যাকআপের জন্য)
+    caption = (
+        f"🔔 নতুন ডিপোজিট রিকোয়েস্ট! 🔔\n"
+        f"👤 ব্যবহারকারী: @{username}\n"
+        f"🆔 ইউজার আইডি: {user.id}\n"
+        f"💳 মেথড: {method_name}\n"
+        f"💰 পরিমাণ: {amount} টাকা\n"
+        f"🔑 ট্রানজেকশন আইডি: {trxid}\n"
+        f"⏰ সময়: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        f"📱 এই TRXID অটো ভেরিফাই হবে যখন অ্যাডমিনের ফোনে SMS আসবে!\n"
+        f"⚠️ যদি ৫ মিনিটের মধ্যে অটো না হয়, ম্যানুয়ালি কনফর্ম করুন।"
+    )
+    
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Confirm (Manual)", callback_data=f"deposit_confirm:{user.id}:{amount}"),
+            InlineKeyboardButton("❌ Cancel", callback_data=f"deposit_cancel:{user.id}")
+        ]
+    ])
+    
+    await context.bot.send_message(
+        chat_id=ADMIN_ID,
+        text=caption,
+        reply_markup=keyboard
+    )
+    
+    await update.message.reply_text(
+        f"✅ আপনার ডিপোজিট রিকোয়েস্ট পাঠানো হয়েছে।\n\n"
+        f"📱 যখন অ্যাডমিনের ফোনে আপনার ট্রানজেকশনের SMS আসবে, তখন স্বয়ংক্রিয়ভাবে আপনার ব্যালেন্স অ্যাড হবে!\n"
+        f"⏳ সাধারণত ১-২ মিনিটের মধ্যে হয়ে যায়।\n\n"
+        f"⚠️ যদি ৫ মিনিটের মধ্যে অটো অ্যাড না হয়, অ্যাডমিন ম্যানুয়ালি কনফর্ম করবেন।",
+        reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Back to Main Menu")]], resize_keyboard=True)
+    )
+    
+    context.user_data.clear()
+    return MAIN_MENU
+
+# ================ DASHBOARD ================
+async def show_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return MAIN_MENU
+
+    global total_deposits, total_sales, balances, sales_count_per_category, user_info, transaction_log, dashboard_message
+
+    total_users_count = len(user_info)
+    
+    stock_info = ""
+    for main_cat, sub_cats in categories.items():
+        stock_info += f"  - {main_cat}\n" 
+        for sub_cat in sub_cats:
+            count = count_items(main_cat, sub_cat)
+            stock_info += f"    - {sub_cat}: {count} টি আইটেম\n"
+
+    sorted_sales = sorted(sales_count_per_category.items(), key=lambda item: item[1], reverse=True)
+    top_selling_info = ""
+    for sub_cat, count in sorted_sales[:10]:
+        top_selling_info += f"  - {sub_cat}: {count} বিক্রয়\n"
+    if len(sorted_sales) > 10:
+        top_selling_info += f"  - ... এবং আরও {len(sorted_sales) - 10}টি ক্যাটাগরি"
+
+    recent_transactions = ""
+    last_5_transactions = transaction_log[-5:]
+    if last_5_transactions:
+        for trans in reversed(last_5_transactions):
+            trans_type, user_id, amount, timestamp = trans
+            date_str = time.strftime('%H:%M %b %d', time.localtime(timestamp))
+            user_data = user_info.get(user_id, {})
+            username = user_data.get("username", "N/A")
+            if trans_type == 'deposit':
+                recent_transactions += f"  - 💸 ডিপোজিট: {amount} টাকা (@{username}) {date_str}\n" 
+            elif trans_type == 'sale':
+                recent_transactions += f"  - 🛒 বিক্রয়: {amount} টাকা (@{username}) {date_str}\n"
+    else:
+        recent_transactions = "  - কোনো সাম্প্রতিক লেনদেন নেই।\n"
+    
+    daily_deposits, daily_sales = get_report_summary(transaction_log, 1)
+    weekly_deposits, weekly_sales = get_report_summary(transaction_log, 7)
+    monthly_deposits, monthly_sales = get_report_summary(transaction_log, 30)
+
+    # পেন্ডিং ডিপোজিটের সংখ্যা
+    pending_count = len(pending_deposits)
+    
+    # প্রসেস করা TRXID সংখ্যা
+    processed_count = len(processed_trxids)
+
+    dashboard_text = (
+        f"📝 ড্যাশবোর্ড মেসেজ:\n"
+        f"{dashboard_message}\n"
+        "---------------------------\n"
+        "📊 ড্যাশবোর্ড সামারি\n"
+        f"👥 মোট ব্যবহারকারী: {total_users_count}\n"
+        f"💰 মোট ব্যালেন্স: {sum(balances.values())} টাকা\n"
+        f"🛒 মোট বিক্রয়: {total_sales} টাকা\n"
+        f"💸 মোট ডিপোজিট: {total_deposits} টাকা\n"
+        f"⏳ পেন্ডিং ডিপোজিট: {pending_count} টি\n"
+        f"✅ প্রসেসড TRXID: {processed_count} টি\n"
+        "---------------------------\n"
+        "📈 দৈনিক/সাপ্তাহিক/মাসিক রিপোর্ট\n"
+        f"গত ২৪ ঘণ্টা:\n"
+        f"  - ডিপোজিট: {daily_deposits} টাকা\n"
+        f"  - বিক্রয়: {daily_sales} টাকা\n"
+        f"গত ৭ দিন:\n"
+        f"  - ডিপোজিট: {weekly_deposits} টাকা\n"
+        f"  - বিক্রয়: {weekly_sales} টাকা\n"
+        f"গত ৩০ দিন:\n"
+        f"  - ডিপোজিট: {monthly_deposits} টাকা\n"
+        f"  - বিক্রয়: {monthly_sales} টাকা\n"
+        "---------------------------\n"
+        "📦 বর্তমান স্টক তথ্য:\n"
+        f"{stock_info or '  - কোনো ক্যাটাগরি পাওয়া যায়নি।'}\n"
+        "---------------------------\n"
+        "📈 সর্বাধিক বিক্রীত ক্যাটাগরি:\n"
+        f"{top_selling_info or '  - এখনো কোনো বিক্রয় হয়নি।'}\n"
+        "---------------------------\n"
+        "📜 সর্বশেষ লেনদেন:\n"
+        f"{recent_transactions}\n"
+    )
+    
+    if len(dashboard_text) > 4000:
+        parts = [dashboard_text[i:i+4000] for i in range(0, len(dashboard_text), 4000)]
+        for part in parts:
+            await update.message.reply_text(part)
+    else:
+        await update.message.reply_text(dashboard_text)
+    
+    keyboard = [
+        [KeyboardButton("🔄 Refresh Dashboard"), KeyboardButton("👥 User Profile")],
+        [KeyboardButton("📂 Manage Categories"), KeyboardButton("💰 Edit Price")],
+        [KeyboardButton("✏️ Edit Balance"), KeyboardButton("📢 Send Notice")],
+        [KeyboardButton("💳 Payment Methods"), KeyboardButton("💳 Payment Categories")],
+        [KeyboardButton("📱 SMS Auto Deposit"), KeyboardButton("📋 SMS Log")],
+        [KeyboardButton("🔙 Back to Main Menu")]
+    ]
+    
+    await update.message.reply_text("⚙️ অ্যাডমিন প্যানেল:", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+    return ADMIN_PANEL
+
+async def handle_dashboard_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return MAIN_MENU
+
+    if update.message.text == "🔄 Refresh Dashboard":
+        return await show_dashboard(update, context)
+    return await back_to_admin_panel_handler(update, context)
+
+# ================ USER PROFILE ================
+async def view_user_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return MAIN_MENU
+    await update.message.reply_text("✍️ যে ব্যবহারকারীর প্রোফাইল দেখতে চান তার ইউজারনাম বা ইউজার আইডি লিখুন:", reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Admin Panel")]], resize_keyboard=True))
+    return SEARCH_USER_PROFILE
+
+async def search_and_show_user_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return MAIN_MENU
+        
+    search_term = update.message.text.strip().lstrip('@')
+    
+    if search_term == "🔙 Admin Panel":
+        return await back_to_admin_panel_handler(update, context)
+
+    found_user_id = None
+    
+    if search_term.isdigit():
+        search_id = int(search_term)
+        if search_id in user_info:
+            found_user_id = search_id
+    
+    if not found_user_id:
+        for user_id, info in user_info.items():
+            if info.get("username") and info["username"].lower() == search_term.lower():
+                found_user_id = user_id
+                break
+
+    if not found_user_id:
+        await update.message.reply_text("❌ এই ইউজারনেম বা ইউজার আইডি এর কোনো ব্যবহারকারী পাওয়া যায়নি।", reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Admin Panel")]], resize_keyboard=True))
+        return SEARCH_USER_PROFILE
+
+    user_transactions = get_user_transactions(found_user_id, transaction_log)
+    
+    balance = balances.get(found_user_id, 0)
+    deposits = user_deposits.get(found_user_id, 0)
+    sales = user_sales.get(found_user_id, 0)
+
+    daily_deposits, daily_sales = get_report_summary(user_transactions, 1)
+    weekly_deposits, weekly_sales = get_report_summary(user_transactions, 7)
+    monthly_deposits, monthly_sales = get_report_summary(user_transactions, 30)
+    yearly_deposits, yearly_sales = get_report_summary(user_transactions, 365)
+    
+    user_data = user_info.get(found_user_id, {})
+    full_name = user_data.get("first_name", "") + (f" {user_data['last_name']}" if user_data.get("last_name") else "")
+    username = user_data.get('username', 'N/A')
+    
+    profile_text = (
+        f"👤 ব্যবহারকারী প্রোফাইল:\n"
+        f"নাম: {full_name}\n"
+        f"ইউজারনেম: @{username}\n"
+        f"আইডি: {found_user_id}\n"
+        "---------------------------\n"
+        f"💰 বর্তমান ব্যালেন্স: {balance} টাকা\n"
+        f"💸 মোট ডিপোজিট: {deposits} টাকা\n"
+        f"🛒 মোট খরচ: {sales} টাকা\n"
+        "---------------------------\n"
+        "📈 লেনদেনের রিপোর্ট\n"
+        f"গত ২৪ ঘণ্টা:\n"
+        f"  - ডিপোজিট: {daily_deposits} টাকা\n"
+        f"  - খরচ: {daily_sales} টাকা\n"
+        f"গত ৭ দিন:\n"
+        f"  - ডিপোজিট: {weekly_deposits} টাকা\n"
+        f"  - খরচ: {weekly_sales} টাকা\n"
+        f"গত ৩০ দিন:\n"
+        f"  - ডিপোজিট: {monthly_deposits} টাকা\n"
+        f"  - খরচ: {monthly_sales} টাকা\n"
+        f"গত ১ বছর:\n"
+        f"  - ডিপোজিট: {yearly_deposits} টাকা\n"
+        f"  - খরচ: {yearly_sales} টাকা\n"
+    )
+    
+    await update.message.reply_text(profile_text, reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Admin Panel")]], resize_keyboard=True))
+    return SEARCH_USER_PROFILE
+
+# ================ BALANCE EDIT ================
+async def edit_user_balance_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return MAIN_MENU
+    
+    await update.message.reply_text(
+        "✍️ যে ব্যবহারকারীর ব্যালেন্স পরিবর্তন করতে চান তার ইউজারনাম বা ইউজার আইডি লিখুন:",
+        reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Admin Panel")]], resize_keyboard=True)
+    )
+    return SEARCH_USER_FOR_BALANCE
+
+async def search_user_for_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return MAIN_MENU
+        
+    search_term = update.message.text.strip().lstrip('@')
+    
+    if search_term == "🔙 Admin Panel":
+        return await back_to_admin_panel_handler(update, context)
+
+    found_user_id = None
+    
+    if search_term.isdigit():
+        search_id = int(search_term)
+        if search_id in user_info:
+            found_user_id = search_id
+    
+    if not found_user_id:
+        for user_id, info in user_info.items():
+            if info.get("username") and info["username"].lower() == search_term.lower():
+                found_user_id = user_id
+                break
+
+    if not found_user_id:
+        await update.message.reply_text(
+            "❌ এই ইউজারনেম বা ইউজার আইডি এর কোনো ব্যবহারকারী পাওয়া যায়নি। আবার চেষ্টা করুন।",
+            reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Admin Panel")]], resize_keyboard=True)
+        )
+        return SEARCH_USER_FOR_BALANCE
+
+    context.user_data['edit_balance_user_id'] = found_user_id
+    
+    user_data = user_info.get(found_user_id, {})
+    username = user_data.get('username', 'N/A')
+    current_balance = balances.get(found_user_id, 0)
+
+    keyboard = [
+        [KeyboardButton("➕ Add Balance"), KeyboardButton("➖ Remove Balance")],
+        [KeyboardButton("✍️ Set New Balance")],
+        [KeyboardButton("🔙 Admin Panel")]
+    ]
+    
+    await update.message.reply_text(
+        f"👤 ব্যবহারকারী: @{username} (আইডি: {found_user_id})\n"
+        f"💰 বর্তমান ব্যালেন্স: {current_balance} টাকা\n\n"
+        f"আপনি কী করতে চান?",
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    )
+    return BALANCE_EDIT_ACTION
+
+async def balance_edit_action_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return MAIN_MENU
+
+    action_text = update.message.text
+    
+    if action_text == "🔙 Admin Panel":
+        return await back_to_admin_panel_handler(update, context)
+
+    if action_text not in ["➕ Add Balance", "➖ Remove Balance", "✍️ Set New Balance"]:
+        await update.message.reply_text("❌ অনুগ্রহ করে নিচের বাটন থেকে একটি অপশন বেছে নিন।")
+        return BALANCE_EDIT_ACTION
+
+    context.user_data['balance_edit_action'] = action_text
+    
+    if action_text == "➕ Add Balance":
+        prompt = "✍️ কত টাকা যোগ করতে চান তা লিখুন:"
+    elif action_text == "➖ Remove Balance":
+        prompt = "✍️ কত টাকা সরাতে চান তা লিখুন:"
+    else:
+        prompt = "✍️ নতুন ব্যালেন্স কত হবে তা লিখুন:"
+        
+    await update.message.reply_text(
+        prompt,
+        reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Admin Panel")]], resize_keyboard=True)
+    )
+    return RECEIVE_BALANCE_EDIT_AMOUNT
+
+async def receive_balance_edit_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return MAIN_MENU
+
+    amount_str = update.message.text.strip()
+    
+    if amount_str == "🔙 Admin Panel":
+        context.user_data.pop('edit_balance_user_id', None)
+        context.user_data.pop('balance_edit_action', None)
+        return await back_to_admin_panel_handler(update, context)
+
+    if not amount_str.isdigit() or float(amount_str) < 0:
+        await update.message.reply_text(
+            "❌ অনুগ্রহ করে একটি ধনাত্মক সংখ্যা লিখুন।",
+            reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Admin Panel")]], resize_keyboard=True)
+        )
+        return RECEIVE_BALANCE_EDIT_AMOUNT
+        
+    amount = float(amount_str)
+    user_id = context.user_data.get('edit_balance_user_id')
+    action = context.user_data.get('balance_edit_action')
+
+    if not user_id or not action:
+        await update.message.reply_text("❌ একটি ত্রুটি ঘটেছে। অনুগ্রহ করে আবার শুরু করুন।")
+        return await back_to_admin_panel_handler(update, context)
+
+    old_balance = balances.get(user_id, 0)
+    new_balance = 0
+    
+    if action == "➕ Add Balance":
+        new_balance = old_balance + amount
+        balances[user_id] = new_balance
+        user_message = f"✅ অ্যাডমিন আপনার ব্যালেন্সে {amount} টাকা যোগ করেছে।\nআপনার নতুন ব্যালেন্স: {new_balance} টাকা।"
+        admin_message = f"✅ ব্যবহারকারীর ব্যালেন্সে {amount} টাকা যোগ করা হয়েছে।\nনতুন ব্যালেন্স: {new_balance} টাকা।"
+
+    elif action == "➖ Remove Balance":
+        new_balance = old_balance - amount
+        if new_balance < 0:
+            new_balance = 0
+        balances[user_id] = new_balance
+        user_message = f"✅ অ্যাডমিন আপনার ব্যালেন্স থেকে {amount} টাকা সরিয়ে নিয়েছে।\nআপনার নতুন ব্যালেন্স: {new_balance} টাকা।"
+        admin_message = f"✅ ব্যবহারকারীর ব্যালেন্স থেকে {amount} টাকা সরানো হয়েছে।\nনতুন ব্যালেন্স: {new_balance} টাকা।"
+
+    elif action == "✍️ Set New Balance":
+        new_balance = amount
+        balances[user_id] = new_balance
+        user_message = f"✅ অ্যাডমিন আপনার নতুন ব্যালেন্স {new_balance} টাকা সেট করেছে।"
+        admin_message = f"✅ ব্যবহারকারীর নতুন ব্যালেন্স {new_balance} টাকা সেট করা হয়েছে।"
+
+    save_user_data()
+
+    try:
+        await context.bot.send_message(chat_id=user_id, text=user_message)
+    except Exception as e:
+        logger.error(f"Failed to notify user {user_id} about balance change: {e}")
+        admin_message += "\n⚠️ ব্যবহারকারীকে নোটিশ পাঠানো যায়নি।"
+
+    await update.message.reply_text(admin_message)
+    
+    context.user_data.pop('edit_balance_user_id', None)
+    context.user_data.pop('balance_edit_action', None)
+    
+    return await show_dashboard(update, context)
+
+# ================ ADMIN PANEL ================
+async def back_to_admin_panel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return MAIN_MENU
+    return await show_dashboard(update, context)
+
+async def admin_panel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return MAIN_MENU
+
+    text = update.message.text
+    
+    if text == "🔙 Back to Main Menu":
+        return await start(update, context)
+    
+    if text == "🔄 Refresh Dashboard":
+        return await show_dashboard(update, context)
+    
+    if text == "👥 User Profile":
+        return await view_user_profile(update, context)
+
+    if text == "✏️ Edit Balance":
+        return await edit_user_balance_start(update, context)
+        
+    if text == "📢 Send Notice":
+        await update.message.reply_text("✍️ যে নোটিশটি পাঠাতে চান তা লিখুন:", reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Admin Panel")]], resize_keyboard=True))
+        return SEND_NOTICE
+        
+    if text == "📂 Manage Categories":
+        keyboard = []
+        for cat in categories.keys():
+            stock_count = get_total_stock(cat)
+            keyboard.append([KeyboardButton(f"{cat} ({stock_count})")])
+        
+        keyboard.append([KeyboardButton("➕ Add Main Category")])
+        keyboard.append([KeyboardButton("➖ Remove Main Category")])
+        keyboard.append([KeyboardButton("🔙 Admin Panel")])
+        await update.message.reply_text("⚙️ প্রধান ক্যাটাগরি ব্যবস্থাপনা:", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+        return MANAGE_CATEGORY
+
+    if text == "💰 Edit Price":
+        keyboard = [[KeyboardButton(cat)] for cat in categories.keys()]
+        keyboard.append([KeyboardButton("🔙 Admin Panel")])
+        await update.message.reply_text("✍️ কোন ক্যাটাগরির মূল্য পরিবর্তন করবেন?", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+        return EDIT_PRICE_MAIN
+
+    if text == "💳 Payment Methods":
+        return await admin_manage_payment_methods(update, context)
+
+    if text == "💳 Payment Categories":
+        return await manage_payment_categories_handler(update, context)
+    
+    if text == "📱 SMS Auto Deposit":
+        return await show_pending_deposits(update, context)
+    
+    if text == "📋 SMS Log":
+        return await show_sms_log(update, context)
+         
+    return ADMIN_PANEL
+
+# ================ SMS LOG VIEWER ================
+async def show_sms_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return MAIN_MENU
+    
+    try:
+        with open(SMS_LOG_FILE, "r", encoding='utf-8') as f:
+            lines = f.readlines()
+        
+        if not lines:
+            await update.message.reply_text("📋 এখনো কোনো SMS লগ নেই।")
+            return ADMIN_PANEL
+        
+        # সর্বশেষ ২০টি লগ দেখান
+        recent_lines = lines[-20:]
+        log_text = "📋 সর্বশেষ SMS লগ:\n\n" + "".join(recent_lines)
+        
+        if len(log_text) > 4000:
+            parts = [log_text[i:i+4000] for i in range(0, len(log_text), 4000)]
+            for part in parts:
+                await update.message.reply_text(part)
+        else:
+            await update.message.reply_text(log_text)
+            
+    except FileNotFoundError:
+        await update.message.reply_text("📋 এখনো কোনো SMS লগ নেই।")
+    
+    return ADMIN_PANEL
+
+# ================ SHOW PENDING DEPOSITS ================
+async def show_pending_deposits(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return MAIN_MENU
+    
+    if not pending_deposits:
+        await update.message.reply_text(
+            "✅ কোনো পেন্ডিং ডিপোজিট নেই।\n\n"
+            "📱 SMS Auto Deposit সিস্টেম সক্রিয় আছে।\n"
+            "যখন অ্যাডমিনের ফোনে bKash SMS আসবে, TRXID মিলিয়ে অটো ডিপোজিট হবে।",
+            reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Admin Panel")]], resize_keyboard=True)
+        )
+        return ADMIN_PANEL
+    
+    pending_text = "⏳ পেন্ডিং ডিপোজিট সমূহ:\n\n"
+    for trxid, data in pending_deposits.items():
+        user_id = data['user_id']
+        user = user_info.get(user_id, {})
+        username = user.get('username', 'N/A')
+        pending_text += f"🔑 TRXID: {trxid}\n"
+        pending_text += f"👤 ইউজার: @{username} (ID: {user_id})\n"
+        pending_text += f"💰 পরিমাণ: {data['amount']} টাকা\n"
+        pending_text += f"💳 মেথড: {data.get('method', 'Unknown')}\n"
+        pending_text += f"⏰ সময়: {time.strftime('%H:%M %b %d', time.localtime(data['timestamp']))}\n"
+        pending_text += "---------------------------\n"
+    
+    pending_text += f"\n📱 মোট পেন্ডিং: {len(pending_deposits)} টি"
+    
+    if len(pending_text) > 4000:
+        parts = [pending_text[i:i+4000] for i in range(0, len(pending_text), 4000)]
+        for part in parts:
+            await update.message.reply_text(part)
+    else:
+        await update.message.reply_text(pending_text)
+    
+    return ADMIN_PANEL
+
+# ================ ADMIN PAYMENT METHODS MANAGEMENT ================
+async def admin_manage_payment_methods(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return MAIN_MENU
+    
+    keyboard = [
+        [KeyboardButton("➕ Add Payment Method")],
+        [KeyboardButton("📋 View All Methods")],
+        [KeyboardButton("🗑️ Delete Payment Method")],
+        [KeyboardButton("🔙 Admin Panel")]
+    ]
+    
+    await update.message.reply_text(
+        "💳 পেমেন্ট মেথড ম্যানেজমেন্ট\n\n"
+        "আপনি নতুন পেমেন্ট মেথড যোগ করতে পারেন, "
+        "সব মেথড দেখতে পারেন, অথবা কোনো মেথড ডিলিট করতে পারেন।",
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    )
+    return ADMIN_VIEW_PAYMENT_METHODS
+
+async def admin_add_payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return MAIN_MENU
+    
+    await update.message.reply_text(
+        "✍️ নতুন পেমেন্ট মেথডের নাম লিখুন:\n"
+        "(যেমন: বিকাশ, নগদ, রকেট, ব্যাংক ট্রান্সফার ইত্যাদি)",
+        reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Admin Panel")]], resize_keyboard=True)
+    )
+    return ADMIN_ADD_PAYMENT_METHOD
+
+async def admin_receive_payment_method_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return MAIN_MENU
+    
+    method_name = update.message.text.strip()
+    
+    if method_name == "🔙 Admin Panel":
+        return await back_to_admin_panel_handler(update, context)
+    
+    if method_name in payment_methods:
+        await update.message.reply_text(
+            f"⚠️ '{method_name}' নামে একটি পেমেন্ট মেথড ইতিমধ্যে আছে।\n"
+            f"আলাদা নাম ব্যবহার করুন।",
+            reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Admin Panel")]], resize_keyboard=True)
+        )
+        return ADMIN_ADD_PAYMENT_METHOD
+    
+    context.user_data['new_payment_method_name'] = method_name
+    
+    await update.message.reply_text(
+        f"✍️ '{method_name}' এর জন্য বিস্তারিত তথ্য লিখুন:\n"
+        f"(যেমন: নাম্বার, একাউন্ট নাম, রেফারেন্স ইত্যাদি)\n\n"
+        f"📝 প্রতিটি লাইনে একটি করে তথ্য লিখুন।",
+        reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Admin Panel")]], resize_keyboard=True)
+    )
+    return ADMIN_RECEIVE_PAYMENT_DETAILS
+
+async def admin_receive_payment_method_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return MAIN_MENU
+    
+    details = update.message.text.strip()
+    
+    if details == "🔙 Admin Panel":
+        context.user_data.pop('new_payment_method_name', None)
+        return await back_to_admin_panel_handler(update, context)
+    
+    method_name = context.user_data.get('new_payment_method_name')
+    
+    if not method_name:
+        await update.message.reply_text("❌ একটি ত্রুটি ঘটেছে। অনুগ্রহ করে আবার শুরু করুন।")
+        return await back_to_admin_panel_handler(update, context)
+    
+    payment_methods[method_name] = {
+        "details": details,
+        "active": True
+    }
+    
+    save_user_data()
+    
+    await update.message.reply_text(
+        f"✅ '{method_name}' পেমেন্ট মেথড সফলভাবে যোগ হয়েছে!\n\n"
+        f"📋 বিস্তারিত:\n{details}",
+        reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Admin Panel")]], resize_keyboard=True)
+    )
+    
+    context.user_data.pop('new_payment_method_name', None)
+    return await back_to_admin_panel_handler(update, context)
+
+async def admin_view_payment_methods(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return MAIN_MENU
+    
+    text = update.message.text
+    
+    if text == "🔙 Admin Panel":
+        return await back_to_admin_panel_handler(update, context)
+    
+    if text == "➕ Add Payment Method":
+        return await admin_add_payment_method(update, context)
+    
+    if text == "📋 View All Methods":
+        if not payment_methods:
+            await update.message.reply_text(
+                "⚠️ কোনো পেমেন্ট মেথড নেই।",
+                reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Admin Panel")]], resize_keyboard=True)
+            )
+            return ADMIN_VIEW_PAYMENT_METHODS
+        
+        methods_text = "📋 সকল পেমেন্ট মেথড:\n\n"
+        for idx, (name, data) in enumerate(payment_methods.items(), 1):
+            status = "✅ সক্রিয়" if data.get("active", True) else "❌ নিষ্ক্রিয়"
+            methods_text += f"{idx}. {name}\n"
+            methods_text += f"   📝 {data['details']}\n"
+            methods_text += f"   📊 অবস্থা: {status}\n\n"
+        
+        if len(methods_text) > 4000:
+            parts = [methods_text[i:i+4000] for i in range(0, len(methods_text), 4000)]
+            for part in parts:
+                await update.message.reply_text(part)
+        else:
+            await update.message.reply_text(methods_text)
+        
+        return ADMIN_VIEW_PAYMENT_METHODS
+    
+    if text == "🗑️ Delete Payment Method":
+        if not payment_methods:
+            await update.message.reply_text(
+                "⚠️ কোনো পেমেন্ট মেথড নেই।",
+                reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Admin Panel")]], resize_keyboard=True)
+            )
+            return ADMIN_VIEW_PAYMENT_METHODS
+        
+        keyboard = []
+        for method_name in payment_methods.keys():
+            keyboard.append([KeyboardButton(f"❌ {method_name}")])
+        keyboard.append([KeyboardButton("🔙 Admin Panel")])
+        
+        await update.message.reply_text(
+            "🗑️ কোন পেমেন্ট মেথড ডিলিট করতে চান?",
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        )
+        return ADMIN_DELETE_PAYMENT_METHOD
+    
+    return ADMIN_VIEW_PAYMENT_METHODS
+
+async def admin_delete_payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return MAIN_MENU
+    
+    text = update.message.text
+    
+    if text == "🔙 Admin Panel":
+        return await back_to_admin_panel_handler(update, context)
+    
+    method_name = text.replace("❌ ", "").strip()
+    
+    if method_name in payment_methods:
+        del payment_methods[method_name]
+        save_user_data()
+        await update.message.reply_text(
+            f"✅ '{method_name}' পেমেন্ট মেথড ডিলিট করা হয়েছে।",
+            reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Admin Panel")]], resize_keyboard=True)
+        )
+    else:
+        await update.message.reply_text(
+            f"❌ '{method_name}' পেমেন্ট মেথড পাওয়া যায়নি।",
+            reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Admin Panel")]], resize_keyboard=True)
+        )
+    
+    return await back_to_admin_panel_handler(update, context)
+
+# ================ PAYMENT CATEGORIES ================
+async def manage_payment_categories_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return MAIN_MENU
+        
+    keyboard_inline = []
+    if not categories:
+        await update.message.reply_text("⚠️ কোনো ক্যাটাগরি নেই।", reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Admin Panel")]], resize_keyboard=True))
+        return ADMIN_PANEL
+
+    for main_cat in categories:
+        current_status = "Manual 💳" if main_cat in MANUAL_DELIVERY_CATEGORIES else "Balance 💰"
+        button_text = "Switch to Balance" if main_cat in MANUAL_DELIVERY_CATEGORIES else "Switch to Manual"
+        callback_data = f"toggle_payment:{main_cat}"
+        
+        keyboard_inline.append([
+            InlineKeyboardButton(f"{main_cat} ({current_status})", callback_data="ignore"),
+            InlineKeyboardButton(button_text, callback_data=callback_data)
+        ])
+    
+    reply_markup_inline = InlineKeyboardMarkup(keyboard_inline)
+    
+    await update.message.reply_text(
+        "⚡️ পেমেন্ট ক্যাটাগরি নিয়ন্ত্রণ\n\n"
+        "নিচের তালিকা থেকে প্রতিটি ক্যাটাগরির জন্য পেমেন্ট পদ্ধতি পরিবর্তন করতে পারেন।\n"
+        "Balance Payment মানে ব্যবহারকারী তার ব্যালেন্স থেকে কিনতে পারবে।\n"
+        "Manual Payment মানে ব্যবহারকারীকে সরাসরি পেমেন্ট করে স্ক্রিনশট পাঠাতে হবে।",
+        reply_markup=reply_markup_inline
+    )
+
+    reply_markup_text = ReplyKeyboardMarkup([[KeyboardButton("🔙 Admin Panel")]], resize_keyboard=True)
+    await update.message.reply_text(
+        "🔙 অ্যাডমিন প্যানেলে ফিরে যেতে নিচের বাটনটি চাপুন।",
+        reply_markup=reply_markup_text
+    )
+
+    return MANAGE_PAYMENT_CATEGORIES
+
+async def toggle_payment_method(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    
+    if update.effective_user.id != ADMIN_ID:
+        await query.edit_message_caption("❌ অননুমোদিত।", reply_markup=None)
+        return
+        
+    if data.startswith("toggle_payment:"):
+        _, cat_name = data.split(":", 1)
+        
+        if cat_name in MANUAL_DELIVERY_CATEGORIES:
+            MANUAL_DELIVERY_CATEGORIES.remove(cat_name)
+        else:
+            MANUAL_DELIVERY_CATEGORIES.append(cat_name)
+        
+        save_user_data()
+        
+        keyboard = []
+        for main_cat in categories:
+            current_status = "Manual 💳" if main_cat in MANUAL_DELIVERY_CATEGORIES else "Balance 💰"
+            button_text = "Switch to Balance" if main_cat in MANUAL_DELIVERY_CATEGORIES else "Switch to Manual"
+            callback_data = f"toggle_payment:{main_cat}"
+            keyboard.append([
+                InlineKeyboardButton(f"{main_cat} ({current_status})", callback_data="ignore"),
+                InlineKeyboardButton(button_text, callback_data=callback_data)
+            ])
+            
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(
+            "⚡️ পেমেন্ট ক্যাটাগরি নিয়ন্ত্রণ\n\n"
+            "নিচের তালিকা থেকে প্রতিটি ক্যাটাগরির জন্য পেমেন্ট পদ্ধতি পরিবর্তন করতে পারেন।\n"
+            "Balance Payment মানে ব্যবহারকারী তার ব্যালেন্স থেকে কিনতে পারবে।\n"
+            "Manual Payment মানে ব্যবহারকারীকে সরাসরি পেমেন্ট করে স্ক্রিনশট পাঠাতে হবে।",
+            reply_markup=reply_markup
+        )
+    return
+
+# ================ SEND NOTICE ================
+async def send_notice_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return MAIN_MENU
+    
+    notice_text = update.message.text
+    
+    notice_count = 0
+    failed_users = []
+    
+    users_to_notify = [uid for uid in user_info.keys() if uid != ADMIN_ID]
+    
+    if not users_to_notify:
+        await update.message.reply_text("⚠️ কোনো ব্যবহারকারীকে নোটিশ পাঠানো হয়নি। সম্ভবত অন্য কোনো ব্যবহারকারী এখনও বট শুরু করেনি।", reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Admin Panel")]], resize_keyboard=True))
+        return await back_to_admin_panel_handler(update, context)
+
+    for user_id in users_to_notify:
+        try:
+            await context.bot.send_message(chat_id=user_id, text=f"📢 নোটিশ:\n\n{notice_text}")
+            notice_count += 1
+        except Exception:
+            failed_users.append(user_id)
+            pass
+
+    await update.message.reply_text(f"✅ নোটিশ পাঠানো হয়েছে।\n\nসফল: {notice_count} জন ব্যবহারকারীকে\nব্যর্থ: {len(failed_users)} জন ব্যবহারকারীকে", reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Admin Panel")]], resize_keyboard=True))
+    return await back_to_admin_panel_handler(update, context)
+
+# ================ MANAGE CATEGORIES ================
+async def back_to_manage_main_categories_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if "active_main_cat" in context.user_data:
+        del context.user_data["active_main_cat"]
+    if "active_sub_cat" in context.user_data:
+        del context.user_data["active_sub_cat"]
+    return await manage_category_handler(update, context)
+
+async def manage_category_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return MAIN_MENU
+
+    text = update.message.text
+    
+    if text == "🔙 Admin Panel":
+        return await back_to_admin_panel_handler(update, context)
+
+    if text == "➕ Add Main Category":
+        await update.message.reply_text("✍️ নতুন প্রধান ক্যাটাগরির নাম পাঠান:", reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Admin Panel")]], resize_keyboard=True))
+        return ADD_MAIN_CAT
+
+    if text == "➖ Remove Main Category":
+        keyboard = []
+        for cat in categories.keys():
+            stock_count = get_total_stock(cat)
+            keyboard.append([KeyboardButton(f"{cat} ({stock_count})")])
+        
+        keyboard.append([KeyboardButton("🔙 Admin Panel")])
+        await update.message.reply_text("➖ কোন প্রধান ক্যাটাগরি সরাতে চান?", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+        return REMOVE_MAIN_CAT
+    
+    original_cat = text.split(" (")[0]
+    
+    if original_cat in categories:
+        context.user_data["active_main_cat"] = original_cat
+        
+        keyboard = []
+        if categories.get(original_cat):
+            for sub_cat in categories[original_cat]:
+                stock_count = count_items(original_cat, sub_cat)
+                keyboard.append([KeyboardButton(f"{sub_cat} ({stock_count})")])
+        else:
+            keyboard.append([KeyboardButton("⚠️ No Sub Categories")])
+        
+        keyboard.append([KeyboardButton("➕ Add Sub Category")])
+        keyboard.append([KeyboardButton("➖ Remove Sub Category")])
+        keyboard.append([KeyboardButton("➕ Add Items (TXT)")])
+        keyboard.append([KeyboardButton("🔙 Manage Categories"), KeyboardButton("🔙 Admin Panel")])
+        
+        await update.message.reply_text(f"⚙️ {original_cat} এর সাব-ক্যাটাগরি:", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+        return MANAGE_SUB_CATEGORY
+    
+    return MANAGE_CATEGORY
+
+async def add_main_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return MAIN_MENU
+
+    new_cat = update.message.text.strip()
+    
+    if new_cat == "🔙 Admin Panel":
+        return await back_to_admin_panel_handler(update, context)
+        
+    if new_cat in categories:
+        await update.message.reply_text("⚠️ এই প্রধান ক্যাটাগরি আগে থেকেই আছে।")
+    else:
+        categories[new_cat] = []
+        save_user_data()
+        await update.message.reply_text(f"✅ প্রধান ক্যাটাগরি '{new_cat}' যোগ হয়েছে।")
+    
+    return await manage_category_handler(update, context)
+
+async def remove_main_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return MAIN_MENU
+
+    cat_to_remove = update.message.text.split(" (")[0].strip()
+    
+    if cat_to_remove == "🔙 Admin Panel":
+        return await back_to_admin_panel_handler(update, context)
+        
+    if cat_to_remove in categories:
+        if cat_to_remove in categories:
+            for sub_cat in categories[cat_to_remove]:
+                txt_path = get_txt_path(cat_to_remove, sub_cat)
+                if os.path.exists(txt_path):
+                    os.remove(txt_path)
+                excel_path = get_excel_path(cat_to_remove, sub_cat)
+                if os.path.exists(excel_path):
+                    os.remove(excel_path)
+                if cat_to_remove in prices and sub_cat in prices[cat_to_remove]:
+                    del prices[cat_to_remove][sub_cat]
+        if cat_to_remove in prices:
+            del prices[cat_to_remove]
+        
+        del categories[cat_to_remove]
+        if cat_to_remove in MANUAL_DELIVERY_CATEGORIES:
+            MANUAL_DELIVERY_CATEGORIES.remove(cat_to_remove)
+            
+        save_user_data()
+        await update.message.reply_text(f"✅ প্রধান ক্যাটাগরি '{cat_to_remove}' সরানো হয়েছে।")
+    else:
+        await update.message.reply_text("⚠️ এই ক্যাটাগরি পাওয়া যায়নি।")
+    
+    return await manage_category_handler(update, context)
+
+async def manage_sub_category_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return MAIN_MENU
+        
+    text = update.message.text
+    main_cat = context.user_data.get("active_main_cat")
+    
+    if text == "🔙 Manage Categories":
+        if "active_main_cat" in context.user_data:
+            del context.user_data["active_main_cat"]
+        if "active_sub_cat" in context.user_data:
+            del context.user_data["active_sub_cat"]
+        return await manage_category_handler(update, context)
+    
+    if text == "🔙 Admin Panel":
+        return await back_to_admin_panel_handler(update, context)
+
+    if text == "➕ Add Sub Category":
+        await update.message.reply_text("✍️ নতুন সাব-ক্যাটাগরির নাম পাঠান:", reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Manage Categories"), KeyboardButton("🔙 Admin Panel")]], resize_keyboard=True))
+        return ADD_SUB_CAT
+        
+    if text == "➖ Remove Sub Category":
+        if not categories.get(main_cat, []):
+            await update.message.reply_text("⚠️ কোনো সাব-ক্যাটাগরি নেই।", reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Manage Categories")]], resize_keyboard=True))
+            return MANAGE_SUB_CATEGORY
+            
+        keyboard = [[KeyboardButton(sub_cat)] for sub_cat in categories.get(main_cat, [])]
+        keyboard.append([KeyboardButton("🔙 Manage Categories"), KeyboardButton("🔙 Admin Panel")])
+        await update.message.reply_text("➖ কোন সাব-ক্যাটাগরি সরাতে চান?", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+        return REMOVE_SUB_CAT
+        
+    if text == "➕ Add Items (TXT)":
+        if not categories.get(main_cat, []):
+            await update.message.reply_text("⚠️ কোনো সাব-ক্যাটাগরি নেই। আগে সাব-ক্যাটাগরি তৈরি করুন।", reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Manage Categories")]], resize_keyboard=True))
+            return MANAGE_SUB_CATEGORY
+            
+        context.user_data["active_sub_cat"] = None
+        keyboard = [[KeyboardButton(sub_cat)] for sub_cat in categories.get(main_cat, [])]
+        keyboard.append([KeyboardButton("🔙 Manage Categories"), KeyboardButton("🔙 Admin Panel")])
+        await update.message.reply_text(
+            f"📁 {main_cat} ক্যাটাগরির জন্য সাব-ক্যাটাগরি নির্বাচন করুন:\n\n"
+            f"নিচের সাব-ক্যাটাগরি থেকে একটি নির্বাচন করুন যেখানে আইটেম যোগ করতে চান:",
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        )
+        return ADD_ITEMS_TXT
+    
+    original_sub_cat = text.split(" (")[0]
+    
+    if original_sub_cat in categories.get(main_cat, []):
+        context.user_data["active_sub_cat"] = original_sub_cat
+        count = count_items(main_cat, original_sub_cat)
+        
+        txt_path = get_txt_path(main_cat, original_sub_cat)
+        preview = "কোনো আইটেম নেই"
+        if os.path.exists(txt_path):
+            with open(txt_path, 'r', encoding='utf-8') as f:
+                items = [line.strip() for line in f.readlines() if line.strip()]
+            if items:
+                preview = "\n".join(items[:5])
+                if len(items) > 5:
+                    preview += f"\n... এবং আরও {len(items) - 5}টি আইটেম"
+        
+        keyboard = [
+            [KeyboardButton("➕ Add Items (TXT)")],
+            [KeyboardButton("🔙 Manage Categories"), KeyboardButton("🔙 Admin Panel")]
+        ]
+        await update.message.reply_text(
+            f"⚙️ সাব-ক্যাটাগরি: {original_sub_cat}\n"
+            f"📦 মোট আইটেম: {count} টি\n"
+            f"📄 আইটেম প্রিভিউ:\n{preview}\n\n"
+            f"আইটেম যোগ করতে '➕ Add Items (TXT)' চাপুন।",
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        )
+        return ADD_ITEMS_TXT
+        
+    return MANAGE_SUB_CATEGORY
+
+async def add_sub_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return MAIN_MENU
+
+    new_sub_cat = update.message.text.strip()
+    main_cat = context.user_data.get("active_main_cat")
+    
+    if new_sub_cat == "🔙 Manage Categories":
+        await back_to_manage_main_categories_handler(update, context)
+        return MANAGE_CATEGORY
+
+    if new_sub_cat == "🔙 Admin Panel":
+        return await back_to_admin_panel_handler(update, context)
+
+    if main_cat and new_sub_cat not in categories[main_cat]:
+        categories[main_cat].append(new_sub_cat)
+        ensure_txt_file(main_cat, new_sub_cat)
+        save_user_data()
+        await update.message.reply_text(f"✅ সাব-ক্যাটাগরি '{new_sub_cat}' যোগ হয়েছে।")
+    else:
+        await update.message.reply_text("⚠️ এই সাব-ক্যাটাগরি আগে থেকেই আছে অথবা কোনো প্রধান ক্যাটাগরি নির্বাচন করা হয়নি।")
+    
+    keyboard = []
+    if categories.get(main_cat):
+        for sub_cat in categories[main_cat]:
+            stock_count = count_items(main_cat, sub_cat)
+            keyboard.append([KeyboardButton(f"{sub_cat} ({stock_count})")])
+    
+    keyboard.append([KeyboardButton("➕ Add Sub Category")])
+    keyboard.append([KeyboardButton("➖ Remove Sub Category")])
+    keyboard.append([KeyboardButton("➕ Add Items (TXT)")])
+    keyboard.append([KeyboardButton("🔙 Manage Categories"), KeyboardButton("🔙 Admin Panel")])
+    
+    await update.message.reply_text(
+        f"⚙️ {main_cat} এর সাব-ক্যাটাগরি:", 
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    )
+    return MANAGE_SUB_CATEGORY
+
+async def remove_sub_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return MAIN_MENU
+
+    sub_cat_to_remove = update.message.text.split(" (")[0].strip()
+    main_cat = context.user_data.get("active_main_cat")
+    
+    if sub_cat_to_remove == "🔙 Manage Categories":
+        await back_to_manage_main_categories_handler(update, context)
+        return MANAGE_CATEGORY
+
+    if sub_cat_to_remove == "🔙 Admin Panel":
+        return await back_to_admin_panel_handler(update, context)
+        
+    if main_cat and sub_cat_to_remove in categories.get(main_cat, []):
+        categories[main_cat].remove(sub_cat_to_remove)
+        txt_path = get_txt_path(main_cat, sub_cat_to_remove)
+        if os.path.exists(txt_path):
+            os.remove(txt_path)
+        excel_path = get_excel_path(main_cat, sub_cat_to_remove)
+        if os.path.exists(excel_path):
+            os.remove(excel_path)
+        if main_cat in prices and sub_cat_to_remove in prices[main_cat]:
+            del prices[main_cat][sub_cat_to_remove]
+        save_user_data()
+        await update.message.reply_text(f"✅ সাব-ক্যাটাগরি '{sub_cat_to_remove}' সরানো হয়েছে।")
+    else:
+        await update.message.reply_text("⚠️ এই সাব-ক্যাটাগরি পাওয়া যায়নি।")
+    
+    keyboard = []
+    if categories.get(main_cat):
+        for sub_cat in categories[main_cat]:
+            stock_count = count_items(main_cat, sub_cat)
+            keyboard.append([KeyboardButton(f"{sub_cat} ({stock_count})")])
+    else:
+        keyboard.append([KeyboardButton("⚠️ No Sub Categories")])
+    
+    keyboard.append([KeyboardButton("➕ Add Sub Category")])
+    keyboard.append([KeyboardButton("➖ Remove Sub Category")])
+    keyboard.append([KeyboardButton("➕ Add Items (TXT)")])
+    keyboard.append([KeyboardButton("🔙 Manage Categories"), KeyboardButton("🔙 Admin Panel")])
+    
+    await update.message.reply_text(
+        f"⚙️ {main_cat} এর সাব-ক্যাটাগরি:", 
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    )
+    return MANAGE_SUB_CATEGORY
+
+# ================ ADD ITEMS VIA TXT ================
+async def add_items_txt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return MAIN_MENU
+
+    text = update.message.text
+    
+    if text == "🔙 Manage Categories":
+        await back_to_manage_main_categories_handler(update, context)
+        return MANAGE_CATEGORY
+
+    if text == "🔙 Admin Panel":
+        return await back_to_admin_panel_handler(update, context)
+    
+    main_cat = context.user_data.get("active_main_cat")
+    
+    if not context.user_data.get("active_sub_cat"):
+        if text in categories.get(main_cat, []):
+            context.user_data["active_sub_cat"] = text
+            await update.message.reply_text(
+                f"📁 {main_cat} → {text}\n\n"
+                f"এখন টেক্সট ফাইল আপলোড করুন যা আইটেম ধারণ করে।\n"
+                f"প্রতি লাইনে একটি আইটেম থাকতে হবে।\n\n"
+                f"ফাইল আপলোড করুন অথবা '✅ Done' চাপুন।",
+                reply_markup=ReplyKeyboardMarkup(
+                    [[KeyboardButton("✅ Done"), KeyboardButton("🔙 Manage Categories"), KeyboardButton("🔙 Admin Panel")]],
+                    resize_keyboard=True
+                )
+            )
+            return ADD_ITEMS_TXT
+        else:
+            await update.message.reply_text(
+                "❌ অনুগ্রহ করে একটি বৈধ সাব-ক্যাটাগরি নির্বাচন করুন।",
+                reply_markup=ReplyKeyboardMarkup(
+                    [[KeyboardButton(sub_cat)] for sub_cat in categories.get(main_cat, [])] + 
+                    [[KeyboardButton("🔙 Manage Categories"), KeyboardButton("🔙 Admin Panel")]],
+                    resize_keyboard=True
+                )
+            )
+            return ADD_ITEMS_TXT
+    
+    sub_cat = context.user_data.get("active_sub_cat")
+    
+    if text == "✅ Done":
+        count = count_items(main_cat, sub_cat)
+        await update.message.reply_text(
+            f"✅ '{sub_cat}' তে মোট {count} টি আইটেম আছে।",
+            reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Admin Panel")]], resize_keyboard=True)
+        )
+        context.user_data.pop("active_sub_cat", None)
+        return await back_to_admin_panel_handler(update, context)
+    
+    if update.message.document:
+        file = update.message.document
+        if file.file_name.endswith('.txt'):
+            try:
+                file_obj = await file.get_file()
+                file_content = await file_obj.download_as_bytearray()
+                txt_content = file_content.decode('utf-8')
+                
+                add_items_from_txt(main_cat, sub_cat, txt_content)
+                
+                count = count_items(main_cat, sub_cat)
+                await update.message.reply_text(
+                    f"✅ '{sub_cat}' তে আইটেম যোগ হয়েছে।\n"
+                    f"বর্তমান মোট আইটেম: {count} টি\n\n"
+                    f"আরও ফাইল আপলোড করতে পারেন অথবা '✅ Done' চাপুন।",
+                    reply_markup=ReplyKeyboardMarkup(
+                        [[KeyboardButton("✅ Done"), KeyboardButton("🔙 Manage Categories"), KeyboardButton("🔙 Admin Panel")]],
+                        resize_keyboard=True
+                    )
+                )
+                return ADD_ITEMS_TXT
+                
+            except Exception as e:
+                logger.error(f"Error processing TXT file: {e}")
+                await update.message.reply_text(
+                    "❌ ফাইল প্রসেস করতে সমস্যা হয়েছে। অনুগ্রহ করে সঠিক টেক্সট ফাইল আপলোড করুন।",
+                    reply_markup=ReplyKeyboardMarkup(
+                        [[KeyboardButton("✅ Done"), KeyboardButton("🔙 Manage Categories"), KeyboardButton("🔙 Admin Panel")]],
+                        resize_keyboard=True
+                    )
+                )
+                return ADD_ITEMS_TXT
+        else:
+            await update.message.reply_text(
+                "❌ অনুগ্রহ করে শুধু .txt ফাইল আপলোড করুন।",
+                reply_markup=ReplyKeyboardMarkup(
+                    [[KeyboardButton("✅ Done"), KeyboardButton("🔙 Manage Categories"), KeyboardButton("🔙 Admin Panel")]],
+                    resize_keyboard=True
+                )
+            )
+            return ADD_ITEMS_TXT
+    
+    if text and text not in ["✅ Done", "🔙 Manage Categories", "🔙 Admin Panel"]:
+        add_items_from_txt(main_cat, sub_cat, text)
+        count = count_items(main_cat, sub_cat)
+        await update.message.reply_text(
+            f"✅ '{sub_cat}' তে আইটেম যোগ হয়েছে।\n"
+            f"বর্তমান মোট আইটেম: {count} টি\n\n"
+            f"আরও টেক্সট পাঠাতে পারেন অথবা '✅ Done' চাপুন।",
+            reply_markup=ReplyKeyboardMarkup(
+                [[KeyboardButton("✅ Done"), KeyboardButton("🔙 Manage Categories"), KeyboardButton("🔙 Admin Panel")]],
+                resize_keyboard=True
+            )
+        )
+        return ADD_ITEMS_TXT
+    
+    return ADD_ITEMS_TXT
+
+# ================ EDIT PRICE ================
+async def edit_payment_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return MAIN_MENU
+        
+    global payment_info
+    new_info = update.message.text.strip()
+    
+    if new_info == "🔙 Admin Panel":
+        return await back_to_admin_panel_handler(update, context)
+        
+    payment_info = new_info
+    await update.message.reply_text("✅ পেমেন্ট তথ্য সফলভাবে আপডেট হয়েছে।", reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Admin Panel")]], resize_keyboard=True))
+    return await back_to_admin_panel_handler(update, context)
+
+async def edit_price_main_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return MAIN_MENU
+
+    text = update.message.text.strip()
+    
+    if text == "🔙 Admin Panel":
+        return await back_to_admin_panel_handler(update, context)
+    
+    original_cat = text.split(" (")[0]
+        
+    if original_cat in categories.keys():
+        context.user_data['temp_main_cat_for_price'] = original_cat
+        keyboard = [[KeyboardButton(sub_cat)] for sub_cat in categories[original_cat]]
+        keyboard.append([KeyboardButton("🔙 Admin Panel")])
+        await update.message.reply_text(f"✍️ কোন সাব-ক্যাটাগরির মূল্য পরিবর্তন করবেন?", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+        return EDIT_PRICE_SUB
+        
+    await update.message.reply_text("❌ এই ক্যাটাগরি পাওয়া যায়নি।", reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Admin Panel")]], resize_keyboard=True))
+    return EDIT_PRICE_MAIN
+
+async def edit_price_sub_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return MAIN_MENU
+        
+    text = update.message.text.strip()
+    main_cat = context.user_data.get('temp_main_cat_for_price')
+    
+    if text == "🔙 Admin Panel":
+        if 'temp_main_cat_for_price' in context.user_data:
+            del context.user_data['temp_main_cat_for_price']
+        return await back_to_admin_panel_handler(update, context)
+        
+    if main_cat and text in categories.get(main_cat, []):
+        context.user_data['temp_sub_cat_for_price'] = text
+        current_price = prices.get(main_cat, {}).get(text, "সেট করা হয়নি")
+        await update.message.reply_text(f"✍️ '{text}' এর বর্তমান মূল্য: {current_price}\nনতুন মূল্য লিখুন:", reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Admin Panel")]], resize_keyboard=True))
+        return RECEIVE_NEW_PRICE
+        
+    await update.message.reply_text("❌ এই সাব-ক্যাটাগরি পাওয়া যায়নি।", reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Admin Panel")]], resize_keyboard=True))
+    return EDIT_PRICE_SUB
+
+async def receive_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return MAIN_MENU
+
+    price_text = update.message.text.strip()
+    
+    if price_text == "🔙 Admin Panel":
+        if 'temp_main_cat_for_price' in context.user_data:
+            del context.user_data['temp_main_cat_for_price']
+        if 'temp_sub_cat_for_price' in context.user_data:
+            del context.user_data['temp_sub_cat_for_price']
+        return await back_to_admin_panel_handler(update, context)
+
+    try:
+        new_price = float(price_text)
+        main_cat = context.user_data.get('temp_main_cat_for_price')
+        sub_cat = context.user_data.get('temp_sub_cat_for_price')
+        if main_cat and sub_cat:
+            if main_cat not in prices:
+                prices[main_cat] = {}
+            prices[main_cat][sub_cat] = new_price
+            save_user_data()
+            await update.message.reply_text(f"✅ '{sub_cat}' এর মূল্য এখন {new_price} টাকা।", reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Admin Panel")]], resize_keyboard=True))
+            if 'temp_main_cat_for_price' in context.user_data:
+                del context.user_data['temp_main_cat_for_price']
+            if 'temp_sub_cat_for_price' in context.user_data:
+                del context.user_data['temp_sub_cat_for_price']
+            return await back_to_admin_panel_handler(update, context)
+    except ValueError:
+        await update.message.reply_text("❌ মূল্য শুধুমাত্র সংখ্যায় লিখুন।", reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Admin Panel")]], resize_keyboard=True))
+        return RECEIVE_NEW_PRICE
+        
+    return await back_to_admin_panel_handler(update, context)
+
+# ================ BUY FLOW ================
+async def back_to_categories_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_subscription(update, context):
+        return ConversationHandler.END
+
+    keyboard = []
+    for cat in categories.keys():
+        keyboard.append([KeyboardButton(cat)])
+    
+    keyboard.append([KeyboardButton("🔙 Back to Main Menu")])
+    await update.message.reply_text("🛒 ক্যাটাগরি বেছে নিন:", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+    return BUY_MENU
+
+async def back_to_subcategories_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_subscription(update, context):
+        return ConversationHandler.END
+    
+    main_cat = context.user_data.get('temp_main_cat_for_buy')
+    if not main_cat:
+        return await back_to_categories_handler(update, context)
+        
+    keyboard = []
+    for sub_cat in categories[main_cat]:
+        stock_count = count_items(main_cat, sub_cat)
+        keyboard.append([KeyboardButton(f"{sub_cat} ({stock_count})")])
+        
+    keyboard.append([KeyboardButton("🔙 Back to Categories")])
+    keyboard.append([KeyboardButton("🔙 Back to Main Menu")])
+
+    await update.message.reply_text(f"🛒 {main_cat} এর সাব-ক্যাটাগরি বেছে নিন:", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+    return BUY_SUB_MENU
+
+async def user_choose_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_subscription(update, context):
+        return ConversationHandler.END
+        
+    text = update.message.text.strip()
+    original_cat = text.split(" (")[0]
+    
+    if original_cat == "🔙 Back to Main Menu":
+        return await start(update, context)
+
+    context.user_data.clear()
+
+    if original_cat in categories.keys():
+        context.user_data["temp_main_cat_for_buy"] = original_cat
+        
+        keyboard = []
+        for sub_cat in categories[original_cat]:
+            stock_count = count_items(original_cat, sub_cat)
+            keyboard.append([KeyboardButton(f"{sub_cat} ({stock_count})")])
+        
+        keyboard.append([KeyboardButton("🔙 Back to Categories")])
+        keyboard.append([KeyboardButton("🔙 Back to Main Menu")])
+        
+        await update.message.reply_text(f"🛒 {original_cat} এর সাব-ক্যাটাগরি বেছে নিন:", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+        return BUY_SUB_MENU
+
+    await update.message.reply_text("❌ এই ক্যাটাগরি পাওয়া যায়নি।")
+    return BUY_MENU
+
+async def user_choose_subcategory(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_subscription(update, context):
+        return ConversationHandler.END
+        
+    text = update.message.text.strip()
+    original_sub_cat = text.split(" (")[0]
+    main_cat = context.user_data.get('temp_main_cat_for_buy')
+    
+    if text == "🔙 Back to Categories":
+        return await back_to_categories_handler(update, context)
+    if text == "🔙 Back to Main Menu":
+        return await start(update, context)
+        
+    if main_cat and original_sub_cat in categories.get(main_cat, []):
+        context.user_data["order"] = {"main_cat": main_cat, "sub_cat": original_sub_cat}
+        
+        price = prices.get(main_cat, {}).get(original_sub_cat, "মূল্য এখনো সেট করা হয়নি।")
+        
+        keyboard = [
+            [KeyboardButton("🔙 Back to Sub Categories")],
+            [KeyboardButton("🔙 Back to Main Menu")]
+        ]
+        
+        await update.message.reply_text(f"✅ আপনি {original_sub_cat} সিলেক্ট করেছেন।\n💰 প্রতিটির দাম: {price} টাকা\n\n✍️ অনুগ্রহ করে আপনি কতগুলি চান তা সংখ্যায় লিখুন:", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+        return GET_QUANTITY
+
+    await update.message.reply_text("❌ এই সাব-ক্যাটাগরি পাওয়া যায়নি।")
+    return BUY_SUB_MENU
+
+async def receive_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_subscription(update, context):
+        return ConversationHandler.END
+
+    qty = update.message.text.strip()
+
+    if qty == "🔙 Back to Sub Categories":
+        return await back_to_subcategories_handler(update, context)
+    if qty == "🔙 Back to Main Menu":
+        return await start(update, context)
+    
+    if not qty.isdigit():
+        await update.message.reply_text("❌ অনুগ্রহ করে শুধু সংখ্যা লিখুন।", reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Back to Sub Categories"), KeyboardButton("🔙 Back to Main Menu")]], resize_keyboard=True))
+        return GET_QUANTITY
+        
+    qty = int(qty)
+    order = context.user_data.get("order", {})
+    order["qty"] = qty
+    
+    main_cat = order['main_cat']
+    sub_cat = order['sub_cat']
+    
+    price_per_item = prices.get(main_cat, {}).get(sub_cat, 0)
+    total_price = price_per_item * qty
+    
+    order["price"] = total_price
+    context.user_data["order"] = order
+
+    is_manual = main_cat in MANUAL_DELIVERY_CATEGORIES
+
+    if not is_manual:
+        user_id = update.effective_user.id
+        current_balance = balances.get(user_id, 0)
+    
+        if current_balance >= total_price:
+            keyboard = [
+                [KeyboardButton("✅ Confirm Purchase")],
+                [KeyboardButton("🔙 Back to Sub Categories")],
+                [KeyboardButton("🔙 Back to Main Menu")]
+            ]
+            await update.message.reply_text(
+                f"✅ অর্ডার তৈরি হয়েছে।\n"
+                f"ক্যাটাগরি: {order['sub_cat']}\n"
+                f"পরিমাণ: {order['qty']} টি\n"
+                f"মোট দাম: {total_price} টাকা\n"
+                f"আপনার বর্তমান ব্যালেন্স: {current_balance} টাকা\n\n"
+                f"আপনার ব্যালেন্স থেকে পেমেন্ট করতে '✅ Confirm Purchase' চাপুন।",
+                reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+            )
+            return CONFIRM_ORDER
+        else:
+            await update.message.reply_text(f"❌ আপনার যথেষ্ট ব্যালেন্স নেই। আপনার প্রয়োজন {total_price} টাকা কিন্তু ব্যালেন্স আছে {current_balance} টাকা।", reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Back to Sub Categories"), KeyboardButton("🔙 Back to Main Menu")]], resize_keyboard=True))
+            return BUY_SUB_MENU
+    
+    # For manual delivery categories, show payment methods if available
+    if payment_methods:
+        keyboard = []
+        for method_name in payment_methods.keys():
+            keyboard.append([KeyboardButton(f"💳 {method_name}")])
+        keyboard.append([KeyboardButton("🔙 Back to Sub Categories")])
+        keyboard.append([KeyboardButton("🔙 Back to Main Menu")])
+        
+        await update.message.reply_text(
+            f"✅ অর্ডার তৈরি হয়েছে।\n"
+            f"ক্যাটাগরি: {order['sub_cat']}\n"
+            f"পরিমাণ: {order['qty']} টি\n"
+            f"মোট দাম: {total_price} টাকা\n\n"
+            f"💳 অনুগ্রহ করে একটি পেমেন্ট মেথড নির্বাচন করুন:",
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        )
+        return WAIT_SCREENSHOT
+    else:
+        keyboard = [
+            [KeyboardButton("🔙 Back to Sub Categories")],
+            [KeyboardButton("🔙 Back to Main Menu")]
+        ]
+        await update.message.reply_text(
+            f"✅ অর্ডার তৈরি হয়েছে।\n"
+            f"ক্যাটাগরি: {order['sub_cat']}\n"
+            f"পরিমাণ: {order['qty']} টি\n"
+            f"মোট দাম: {total_price} টাকা\n\n"
+            f"⚠️ কোনো পেমেন্ট মেথড নেই। অ্যাডমিনের সাথে যোগাযোগ করুন।",
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        )
+        return WAIT_SCREENSHOT
+
+async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_subscription(update, context):
+        return ConversationHandler.END
+
+    text = update.message.text
+    
+    if text == "🔙 Back to Sub Categories":
+        return await back_to_subcategories_handler(update, context)
+    if text == "🔙 Back to Main Menu":
+        return await start(update, context)
+    
+    if text == "✅ Confirm Purchase":
+        order = context.user_data.get("order", {})
+        if not order:
+            return ConversationHandler.END
+            
+        user_id = update.effective_user.id
+        main_cat = order['main_cat']
+        sub_cat = order['sub_cat']
+        total_price = order['price']
+        qty = order['qty']
+        current_balance = balances.get(user_id, 0)
+        
+        if current_balance >= total_price:
+            balances[user_id] = current_balance - total_price
+            
+            items = pop_items_from_txt(main_cat, sub_cat, qty)
+            if not items:
+                balances[user_id] = balances.get(user_id, 0) + total_price 
+                await update.message.reply_text("❌ যথেষ্ট আইটেম স্টকে নেই। আপনার ব্যালেন্স ফেরত দেওয়া হয়েছে।", reply_markup=ReplyKeyboardRemove())
+                return await start(update, context)
+            
+            excel_buffer = create_xlsx_file(items, f"{sub_cat}_order.xlsx")
+            
+            await context.bot.send_document(
+                chat_id=user_id,
+                document=InputFile(excel_buffer, filename=f"{sub_cat}_order_{int(time.time())}.xlsx"),
+                caption=f"✅ আপনার অর্ডার সম্পূর্ণ হয়েছে!\n"
+                        f"📦 {sub_cat} - {qty} টি আইটেম\n"
+                        f"💰 মোট: {total_price} টাকা\n"
+                        f"📄 এক্সেল ফাইলে আপনার অর্ডার সংযুক্ত আছে।"
+            )
+            
+            global total_sales, sales_count_per_category, transaction_log, user_sales
+            total_sales += total_price
+            sales_count_per_category[sub_cat] = sales_count_per_category.get(sub_cat, 0) + qty
+            transaction_log.append(('sale', user_id, total_price, time.time()))
+            user_sales[user_id] = user_sales.get(user_id, 0) + total_price
+
+            await update.message.reply_text("✅ ব্যালেন্স ব্যবহার করে আপনার অর্ডার সফল হয়েছে!", reply_markup=ReplyKeyboardRemove())
+            context.user_data.clear()
+            save_user_data()
+            return await start(update, context)
+        else:
+            await update.message.reply_text("❌ আপনার যথেষ্ট ব্যালেন্স নেই।", reply_markup=ReplyKeyboardRemove())
+            return await start(update, context)
+    
+    return CONFIRM_ORDER
+
+async def user_send_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_subscription(update, context):
+        return ConversationHandler.END
+
+    text = update.message.text
+    
+    if text == "🔙 Back to Sub Categories":
+        return await back_to_subcategories_handler(update, context)
+    if text == "🔙 Back to Main Menu":
+        return await start(update, context)
+
+    order = context.user_data.get("order", {})
+    if not order:
+        return ConversationHandler.END
+        
+    main_cat = order['main_cat']
+    sub_cat = order['sub_cat']
+    
+    # If user selects a payment method
+    if text.startswith("💳 "):
+        method_name = text.replace("💳 ", "").strip()
+        if method_name in payment_methods:
+            method_details = payment_methods[method_name].get("details", "কোনো বিস্তারিত তথ্য নেই।")
+            context.user_data['selected_payment_method'] = method_name
+            
+            await update.message.reply_text(
+                f"💳 পেমেন্ট মেথড: {method_name}\n"
+                f"📋 বিস্তারিত:\n{method_details}\n\n"
+                f"📸 পেমেন্টের পর স্ক্রিনশট পাঠান।",
+                reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Back to Sub Categories"), KeyboardButton("🔙 Back to Main Menu")]], resize_keyboard=True)
+            )
+            return WAIT_SCREENSHOT
+
+    if not update.message.photo:
+        await update.message.reply_text(
+            "❌ অনুগ্রহ করে শুধু একটি ছবি পাঠান অথবা একটি পেমেন্ট মেথড নির্বাচন করুন।",
+            reply_markup=ReplyKeyboardMarkup([[KeyboardButton("🔙 Back to Sub Categories"), KeyboardButton("🔙 Back to Main Menu")]], resize_keyboard=True)
+        )
+        return WAIT_SCREENSHOT
+        
+    user = update.effective_user
+    username = user.username if user.username else 'N/A'
+    method_name = context.user_data.get('selected_payment_method', 'অনির্দিষ্ট')
+    
+    caption = (
+        f"🔔 নতুন অর্ডার! 🔔\n"
+        f"ব্যবহারকারী: @{username}\n"
+        f"ক্যাটাগরি: {order['sub_cat']}\n"
+        f"পরিমাণ: {order['qty']} টি\n"
+        f"মূল্য: {order['price']} টাকা\n"
+        f"পেমেন্ট মেথড: {method_name}\n"
+        f"ইউজার আইডি: {user.id}"
+    )
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Confirm Order", callback_data=f"confirm_manual:{user.id}:{order['main_cat']}:{order['sub_cat']}:{order['qty']}:{order['price']}"),
+         InlineKeyboardButton("❌ Cancel Order", callback_data=f"cancel_manual:{user.id}")]
+    ])
+    
+    await context.bot.send_photo(chat_id=ADMIN_ID, photo=update.message.photo[-1].file_id, caption=caption, reply_markup=keyboard)
+    
+    await update.message.reply_text("✅ স্ক্রিনশট অ্যাডমিনকে পাঠানো হয়েছে। অ্যাডমিন নিশ্চিত করার পর আপনার অর্ডার প্রক্রিয়াকৃত হবে।")
+    await start(update, context)
+    context.user_data.clear()
+    return ConversationHandler.END
+
+# ================ ADMIN ORDER ACTIONS ================
+async def admin_order_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global total_sales, sales_count_per_category, transaction_log, user_sales, prices
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    
+    if update.effective_user.id != ADMIN_ID:
+        await query.edit_message_caption("❌ অননুমোদিত।", reply_markup=None)
+        return
+    
+    if data.startswith("confirm_manual:"):
+        parts = data.split(":")
+        uid = int(parts[1])
+        main_cat = parts[2]
+        sub_cat = parts[3]
+        qty = int(parts[4])
+        total_price = float(parts[5])
+        
+        stock_count = count_items(main_cat, sub_cat)
+
+        if stock_count < qty:
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Force Confirm", callback_data=f"force_confirm:{uid}:{main_cat}:{sub_cat}:{qty}:{total_price}"),
+                 InlineKeyboardButton("❌ Cancel", callback_data=f"cancel_manual:{uid}")]
+            ])
+            await query.edit_message_caption(query.message.caption + "\n\n⚠️ স্টকে পর্যাপ্ত আইটেম নেই। আপনি কি নিশ্চিত করতে চান?\n\nযদি নিশ্চিত করেন, আপনাকে ম্যানুয়ালি আইটেমটি পাঠাতে হবে।", reply_markup=keyboard)
+            return
+            
+        items = pop_items_from_txt(main_cat, sub_cat, qty)
+        
+        if not items:
+            await query.edit_message_caption(query.message.caption + "\n\n❌ স্টকে আইটেম নেই।", reply_markup=None)
+            return
+        
+        excel_buffer = create_xlsx_file(items, f"{sub_cat}_order.xlsx")
+        
+        await context.bot.send_document(
+            chat_id=uid,
+            document=InputFile(excel_buffer, filename=f"{sub_cat}_order_{int(time.time())}.xlsx"),
+            caption=f"✅ আপনার অর্ডার নিশ্চিত করা হয়েছে!\n"
+                    f"📦 {sub_cat} - {qty} টি আইটেম\n"
+                    f"💰 মোট: {total_price} টাকা\n"
+                    f"📄 এক্সেল ফাইলে আপনার অর্ডার সংযুক্ত আছে।"
+        )
+        
+        total_sales += total_price
+        sales_count_per_category[sub_cat] = sales_count_per_category.get(sub_cat, 0) + qty
+        transaction_log.append(('sale', uid, total_price, time.time()))
+        user_sales[uid] = user_sales.get(uid, 0) + total_price
+        save_user_data()
+
+        await query.edit_message_caption(query.message.caption + f"\n\n✅ অ্যাডমিন দ্বারা নিশ্চিত। এক্সেল ফাইল ইউজারকে পাঠানো হয়েছে।", reply_markup=None)
+
+    elif data.startswith("force_confirm:"):
+        parts = data.split(":")
+        uid = int(parts[1])
+        main_cat = parts[2]
+        sub_cat = parts[3]
+        qty = int(parts[4])
+        total_price = float(parts[5])
+
+        await context.bot.send_message(
+            chat_id=uid, 
+            text="✅ আপনার অর্ডার নিশ্চিত করা হয়েছে। অ্যাডমিন শীঘ্রই আপনাকে বিস্তারিত তথ্য পাঠাবেন।\n\n"
+                 "⚠️ দয়া করে অপেক্ষা করুন, অ্যাডমিন আপনার আইটেম প্রস্তুত করছে।"
+        )
+        
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=f"⚠️ ফোর্স নিশ্চিত অর্ডার\n"
+                 f"ব্যবহারকারী: {uid}\n"
+                 f"ক্যাটাগরি: {sub_cat}\n"
+                 f"পরিমাণ: {qty} টি\n"
+                 f"মোট: {total_price} টাকা\n\n"
+                 f"স্টকে পর্যাপ্ত আইটেম নেই। অনুগ্রহ করে ম্যানুয়ালি আইটেম পাঠান।"
+        )
+        
+        total_sales += total_price
+        sales_count_per_category[sub_cat] = sales_count_per_category.get(sub_cat, 0) + qty
+        transaction_log.append(('sale', uid, total_price, time.time()))
+        user_sales[uid] = user_sales.get(uid, 0) + total_price
+        save_user_data()
+
+        await query.edit_message_caption(query.message.caption + f"\n\n✅ ফোর্স নিশ্চিত করা হয়েছে। ইউজারকে ম্যানুয়ালি যোগাযোগ করা হবে।", reply_markup=None)
+
+    elif data.startswith("cancel_manual:"):
+        _, uid = data.split(":")
+        
+        await context.bot.send_message(
+            chat_id=uid,
+            text="❌ দুঃখিত, আপনার অর্ডারটি বাতিল করা হয়েছে।"
+        )
+        await query.edit_message_caption(query.message.caption + "\n\n❌ অ্যাডমিন দ্বারা বাতিল", reply_markup=None)
+        
+    else:
+        _, uid = data.split(":")
+        
+        await context.bot.send_message(
+            chat_id=uid,
+            text="❌ দুঃখিত, আপনার অর্ডারটি বাতিল করা হয়েছে।"
+        )
+        await query.edit_message_caption(query.message.caption + "\n\n❌ অ্যাডমিন দ্বারা বাতিল", reply_markup=None)
+
+# ================ ADMIN DEPOSIT ACTIONS ================
+async def admin_deposit_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global total_deposits, transaction_log, user_deposits, balances, pending_deposits, processed_trxids
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if update.effective_user.id != ADMIN_ID:
+        try:
+            await query.edit_message_caption("❌ অননুমোদিত।", reply_markup=None)
+        except:
+            pass
+        return
+    
+    if data.startswith("deposit_confirm:"):
+        parts = data.split(":")
+        uid = int(parts[1])
+        amount = float(parts[2])
+        
+        balances[uid] = balances.get(uid, 0) + amount
+        total_deposits += amount
+        transaction_log.append(('deposit', uid, amount, time.time()))
+        user_deposits[uid] = user_deposits.get(uid, 0) + amount
+        
+        # পেন্ডিং লিস্ট থেকে TRXID রিমুভ করুন (যদি থাকে)
+        for trxid, deposit in list(pending_deposits.items()):
+            if deposit['user_id'] == uid and deposit['amount'] == amount:
+                del pending_deposits[trxid]
+                processed_trxids.add(trxid)
+                break
+        
+        save_user_data()
+
+        await context.bot.send_message(
+            chat_id=uid,
+            text=f"✅ আপনার ডিপোজিট সফল হয়েছে। আপনার ব্যালেন্সে {amount} টাকা যোগ হয়েছে।\n"
+                 f"নতুন ব্যালেন্স: {balances[uid]} টাকা।"
+        )
+        
+        try:
+            await query.edit_message_caption(
+                query.message.caption + 
+                f"\n\n✅ নিশ্চিত করা হয়েছে। {amount} টাকা ইউজার {uid} এর ব্যালেন্সে যোগ করা হয়েছে। "
+                f"বর্তমান মোট ব্যালেন্স: {balances[uid]} টাকা।", 
+                reply_markup=None
+            )
+        except Exception as e:
+            logger.error(f"Failed to edit message caption on deposit confirmation: {e}")
+            await context.bot.send_message(
+                chat_id=ADMIN_ID, 
+                text=f"⚠️ ডিপোজিট নিশ্চিত বার্তা আপডেট করতে ব্যর্থ। ইউজার আইডি: {uid}, পরিমাণ: {amount}"
+            )
+            
+    else:
+        _, uid = data.split(":")
+        uid = int(uid)
+        
+        # পেন্ডিং লিস্ট থেকে TRXID রিমুভ করুন
+        for trxid, deposit in list(pending_deposits.items()):
+            if deposit['user_id'] == uid:
+                del pending_deposits[trxid]
+                break
+        
+        save_user_data()
+        
+        await context.bot.send_message(
+            chat_id=uid,
+            text="❌ দুঃখিত, আপনার ডিপোজিট রিকোয়েস্ট বাতিল করা হয়েছে।"
+        )
+        
+        try:
+            await query.edit_message_caption(
+                query.message.caption + "\n\n❌ অ্যাডমিন দ্বারা ডিপোজিট বাতিল", 
+                reply_markup=None
+            )
+        except Exception as e:
+            logger.error(f"Failed to edit message caption on deposit cancellation: {e}")
+            await context.bot.send_message(
+                chat_id=ADMIN_ID, 
+                text=f"⚠️ ডিপোজিট বাতিল বার্তা আপডেট করতে ব্যর্থ। ইউজার আইডি: {uid}"
+            )
 
 # ================ MAIN ================
-
 def main():
-    # Start HTTP server in background thread
-    http_thread = threading.Thread(target=run_http_server, daemon=True)
-    http_thread.start()
-    
-    updater = Updater(BOT_TOKEN, use_context=True)
-    dp = updater.dispatcher
-    
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CallbackQueryHandler(button_callback))
-    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, message_handler))
-    dp.add_handler(MessageHandler(Filters.document, message_handler))
-    
-    updater.start_polling()
-    print("🤖 Bot is running!")
-    print(f"📁 Upload directory: {UPLOAD_DIR}")
-    print(f"📁 Processed directory: {PROCESSED_DIR}")
-    print(f"📁 Text directory: {TEXT_DIR}")
-    print(f"📁 Report directory: {REPORT_DIR}")
-    print(f"📁 Report Results directory: {REPORT_RESULTS_DIR}")
-    print(f"👑 Admins: {ADMIN_IDS}")
-    print(f"📦 GitHub Backup: Enabled")
-    
-    updater.idle()
+    application = Application.builder().token(BOT_TOKEN).build()
 
-if __name__ == '__main__':
+    conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("start", start),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, menu_handler)
+        ],
+        states={
+            MAIN_MENU: [
+                MessageHandler(filters.TEXT & filters.Regex("🔙 Back to Main Menu"), start),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, menu_handler)
+            ],
+            BUY_MENU: [
+                MessageHandler(filters.TEXT & filters.Regex("🔙 Back to Main Menu"), start),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, user_choose_category)
+            ],
+            BUY_SUB_MENU: [
+                MessageHandler(filters.TEXT & filters.Regex("🔙 Back to Categories"), back_to_categories_handler),
+                MessageHandler(filters.TEXT & filters.Regex("🔙 Back to Main Menu"), start),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, user_choose_subcategory)
+            ],
+            GET_QUANTITY: [
+                MessageHandler(filters.TEXT & filters.Regex("🔙 Back to Sub Categories"), back_to_subcategories_handler),
+                MessageHandler(filters.TEXT & filters.Regex("🔙 Back to Main Menu"), start),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_quantity)
+            ],
+            CONFIRM_ORDER: [
+                MessageHandler(filters.TEXT & filters.Regex("🔙 Back to Sub Categories"), back_to_subcategories_handler),
+                MessageHandler(filters.TEXT & filters.Regex("🔙 Back to Main Menu"), start),
+                MessageHandler(filters.TEXT & filters.Regex("✅ Confirm Purchase"), confirm_order),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, confirm_order)
+            ],
+            WAIT_SCREENSHOT: [
+                MessageHandler(filters.TEXT & filters.Regex("🔙 Back to Sub Categories"), back_to_subcategories_handler),
+                MessageHandler(filters.TEXT & filters.Regex("🔙 Back to Main Menu"), start),
+                MessageHandler(filters.PHOTO | filters.TEXT, user_send_screenshot),
+            ],
+            ADMIN_PANEL: [
+                MessageHandler(filters.TEXT & filters.Regex("🔙 Back to Main Menu"), start),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_panel_handler)
+            ],
+            MANAGE_CATEGORY: [
+                MessageHandler(filters.TEXT & filters.Regex("🔙 Admin Panel"), back_to_admin_panel_handler),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, manage_category_handler)
+            ],
+            MANAGE_SUB_CATEGORY: [
+                MessageHandler(filters.TEXT & filters.Regex("🔙 Admin Panel"), back_to_admin_panel_handler),
+                MessageHandler(filters.TEXT & filters.Regex("🔙 Manage Categories"), back_to_manage_main_categories_handler),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, manage_sub_category_handler)
+            ],
+            ADD_MAIN_CAT: [
+                MessageHandler(filters.TEXT & filters.Regex("🔙 Admin Panel"), back_to_admin_panel_handler),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, add_main_category)
+            ],
+            REMOVE_MAIN_CAT: [
+                MessageHandler(filters.TEXT & filters.Regex("🔙 Admin Panel"), back_to_admin_panel_handler),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, remove_main_category)
+            ],
+            ADD_SUB_CAT: [
+                MessageHandler(filters.TEXT & filters.Regex("🔙 Admin Panel"), back_to_admin_panel_handler),
+                MessageHandler(filters.TEXT & filters.Regex("🔙 Manage Categories"), back_to_manage_main_categories_handler),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, add_sub_category)
+            ],
+            REMOVE_SUB_CAT: [
+                MessageHandler(filters.TEXT & filters.Regex("🔙 Admin Panel"), back_to_admin_panel_handler),
+                MessageHandler(filters.TEXT & filters.Regex("🔙 Manage Categories"), back_to_manage_main_categories_handler),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, remove_sub_category)
+            ],
+            ADD_ITEMS_TXT: [
+                MessageHandler(filters.TEXT & filters.Regex("🔙 Admin Panel"), back_to_admin_panel_handler),
+                MessageHandler(filters.TEXT & filters.Regex("🔙 Manage Categories"), back_to_manage_main_categories_handler),
+                MessageHandler(filters.TEXT & filters.Regex("✅ Done"), add_items_txt_handler),
+                MessageHandler(filters.Document.ALL | filters.TEXT, add_items_txt_handler),
+            ],
+            EDIT_PAYMENT: [
+                MessageHandler(filters.TEXT & filters.Regex("🔙 Admin Panel"), back_to_admin_panel_handler),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_payment_info)
+            ],
+            EDIT_PRICE_MAIN: [
+                MessageHandler(filters.TEXT & filters.Regex("🔙 Admin Panel"), back_to_admin_panel_handler),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_price_main_handler)
+            ],
+            EDIT_PRICE_SUB: [
+                MessageHandler(filters.TEXT & filters.Regex("🔙 Admin Panel"), back_to_admin_panel_handler),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_price_sub_handler)
+            ],
+            RECEIVE_NEW_PRICE: [
+                MessageHandler(filters.TEXT & filters.Regex("🔙 Admin Panel"), back_to_admin_panel_handler),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_price)
+            ],
+            DEPOSIT_SELECT_METHOD: [
+                MessageHandler(filters.TEXT & filters.Regex("🔙 Back to Main Menu"), start),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, deposit_enter_amount)
+            ],
+            DEPOSIT_ENTER_AMOUNT: [
+                MessageHandler(filters.TEXT & filters.Regex("🔙 Back to Main Menu"), start),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, deposit_receive_amount)
+            ],
+            DEPOSIT_ENTER_TRXID: [
+                MessageHandler(filters.TEXT & filters.Regex("🔙 Back to Main Menu"), start),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, deposit_receive_trxid)
+            ],
+            DASHBOARD: [
+                MessageHandler(filters.TEXT & filters.Regex("🔄 Refresh Dashboard"), handle_dashboard_refresh),
+                MessageHandler(filters.TEXT & filters.Regex("🔙 Admin Panel"), back_to_admin_panel_handler)
+            ],
+            SEND_NOTICE: [
+                MessageHandler(filters.TEXT & filters.Regex("🔙 Admin Panel"), back_to_admin_panel_handler),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, send_notice_text)
+            ],
+            SEARCH_USER_PROFILE: [
+                MessageHandler(filters.TEXT & filters.Regex("🔙 Admin Panel"), back_to_admin_panel_handler),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, search_and_show_user_profile)
+            ],
+            MANAGE_PAYMENT_CATEGORIES: [
+                CallbackQueryHandler(toggle_payment_method),
+                MessageHandler(filters.TEXT & filters.Regex("🔙 Admin Panel"), back_to_admin_panel_handler)
+            ],
+            SEARCH_USER_FOR_BALANCE: [
+                MessageHandler(filters.TEXT & filters.Regex("🔙 Admin Panel"), back_to_admin_panel_handler),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, search_user_for_balance)
+            ],
+            BALANCE_EDIT_ACTION: [
+                MessageHandler(filters.TEXT & filters.Regex("🔙 Admin Panel"), back_to_admin_panel_handler),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, balance_edit_action_handler)
+            ],
+            RECEIVE_BALANCE_EDIT_AMOUNT: [
+                MessageHandler(filters.TEXT & filters.Regex("🔙 Admin Panel"), back_to_admin_panel_handler),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_balance_edit_amount)
+            ],
+            ADMIN_VIEW_PAYMENT_METHODS: [
+                MessageHandler(filters.TEXT & filters.Regex("🔙 Admin Panel"), back_to_admin_panel_handler),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_view_payment_methods)
+            ],
+            ADMIN_ADD_PAYMENT_METHOD: [
+                MessageHandler(filters.TEXT & filters.Regex("🔙 Admin Panel"), back_to_admin_panel_handler),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_receive_payment_method_name)
+            ],
+            ADMIN_RECEIVE_PAYMENT_DETAILS: [
+                MessageHandler(filters.TEXT & filters.Regex("🔙 Admin Panel"), back_to_admin_panel_handler),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_receive_payment_method_details)
+            ],
+            ADMIN_DELETE_PAYMENT_METHOD: [
+                MessageHandler(filters.TEXT & filters.Regex("🔙 Admin Panel"), back_to_admin_panel_handler),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, admin_delete_payment_method)
+            ]
+        },
+        fallbacks=[CommandHandler("start", start)]
+    )
+
+    application.add_handler(conv)
+    application.add_handler(CallbackQueryHandler(admin_order_action, pattern="^(confirm:|cancel:|confirm_manual:|cancel_manual:|force_confirm:)"))
+    application.add_handler(CallbackQueryHandler(admin_deposit_action, pattern="^(deposit_confirm:|deposit_cancel:)"))
+    application.add_handler(CallbackQueryHandler(toggle_payment_method, pattern="^toggle_payment:"))
+    
+    # SMS অটো ডিপোজিট হ্যান্ডলার - অ্যাডমিনের চ্যাটে আসা সব টেক্সট মেসেজ চেক করবে
+    application.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.Chat(chat_id=ADMIN_ID),
+        auto_deposit_from_sms
+    ))
+    
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex("🔙 Back to Main Menu"), start))
+    
+    logger.info("🤖 বট চলছে...")
+    application.run_polling()
+
+if __name__ == "__main__":
     main()
